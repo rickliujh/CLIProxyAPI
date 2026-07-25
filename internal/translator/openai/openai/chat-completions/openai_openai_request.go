@@ -1,5 +1,5 @@
-// Package openai provides request translation functionality for OpenAI to OpenAI API compatibility.
-// It converts OpenAI Chat Completions requests into OpenAI-compatible JSON using gjson/sjson only.
+// Package openai provides request translation functionality for OpenAI to Gemini CLI API compatibility.
+// It converts OpenAI Chat Completions requests into Gemini CLI compatible JSON using gjson/sjson only.
 package chat_completions
 
 import (
@@ -8,7 +8,7 @@ import (
 )
 
 // ConvertOpenAIRequestToOpenAI converts an OpenAI Chat Completions request (raw JSON)
-// into a complete OpenAI request JSON. All JSON construction uses sjson and lookups use gjson.
+// into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -16,7 +16,7 @@ import (
 //   - stream: A boolean indicating if the request is for a streaming response (unused in current implementation)
 //
 // Returns:
-//   - []byte: The transformed request data in OpenAI API format
+//   - []byte: The transformed request data in Gemini CLI API format
 func ConvertOpenAIRequestToOpenAI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	currentModel := gjson.GetBytes(inputRawJSON, "model")
 	if currentModel.Type == gjson.String && currentModel.String() == modelName {

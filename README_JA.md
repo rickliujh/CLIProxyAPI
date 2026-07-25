@@ -113,6 +113,7 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 - シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Grok）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
+- Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - Grok Buildのマルチアカウント負荷分散

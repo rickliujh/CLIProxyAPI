@@ -569,6 +569,14 @@ func (a *Auth) AccountInfo() (string, string) {
 			if v, ok := a.Metadata["email"].(string); ok {
 				email := strings.TrimSpace(v)
 				if email != "" {
+					// For Gemini CLI, include the project ID in the account info if present.
+					if strings.EqualFold(a.Provider, "gemini-cli") {
+						if p, okProject := a.Metadata["project_id"].(string); okProject {
+							if p = strings.TrimSpace(p); p != "" {
+								return "oauth", email + " (" + p + ")"
+							}
+						}
+					}
 					return "oauth", email
 				}
 			}

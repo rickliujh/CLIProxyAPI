@@ -1,6 +1,6 @@
 // Package antigravity implements thinking configuration for Antigravity API format.
 //
-// Antigravity uses request.generationConfig.thinkingConfig.* path.
+// Antigravity uses request.generationConfig.thinkingConfig.* path (same as gemini-cli)
 // but requires additional normalization for Claude models:
 //   - Ensure thinking budget < max_tokens
 //   - Remove thinkingConfig if budget < minimum allowed

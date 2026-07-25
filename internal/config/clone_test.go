@@ -129,7 +129,7 @@ func sampleCloneRuntimeConfig() *Config {
 		AntigravitySignatureBypassStrict: &bypassStrict,
 		GeminiKey: []GeminiKey{{
 			APIKey:         "gemini-key",
-			Models:         []GeminiModel{{Name: "gemini-upstream", Alias: "gemini-upstream-alias"}},
+			Models:         []GeminiModel{{Name: "gemini-upstream", Alias: "gemini-client"}},
 			Headers:        map[string]string{"X-Gemini": "one"},
 			ExcludedModels: []string{"gemini-hidden"},
 		}},

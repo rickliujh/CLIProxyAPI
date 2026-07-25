@@ -81,6 +81,7 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"gemini",
 		"gemini-interactions",
 		"vertex",
+		"gemini-cli",
 		"aistudio",
 		"antigravity",
 		"kimi",
