@@ -1104,6 +1104,94 @@
           "high"
         ]
       }
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "object": "model",
+      "created": 1779235200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash",
+      "name": "models/gemini-3.5-flash",
+      "version": "3.5",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-flash",
+      "object": "model",
+      "created": 1779235200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Flash",
+      "name": "models/gemini-3-flash",
+      "version": "3.5",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "models/gemini-3.1-flash-lite",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "high"
+        ]
+      }
     }
   ],
   "aistudio": [
@@ -2450,7 +2538,6 @@
         ]
       }
     }
-
   ],
   "xai": [
     {
