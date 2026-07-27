@@ -5,6 +5,8 @@
 package geminicli
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
@@ -78,6 +80,16 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig) (
 	return a.applyBudgetFormat(body, config)
 }
 
+// wireThinkingLevel renders a canonical thinking level in the casing the Cloud
+// Code Assist backend expects. thinkingLevel is a proto enum whose JSON names are
+// upper case -- see the ThinkingLevel enum in googleapis/js-genai ("HIGH", "LOW",
+// "MEDIUM", "MINIMAL"), which Google's own gemini-cli sends via ThinkingLevel.HIGH.
+// A lower-case value is not a recognised enum name, so the backend discards the
+// thinking configuration and the model returns no thinking at all.
+func wireThinkingLevel(level thinking.ThinkingLevel) string {
+	return strings.ToUpper(strings.TrimSpace(string(level)))
+}
+
 func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
 	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
 	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget")
@@ -89,7 +101,7 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	if config.Mode == thinking.ModeNone {
 		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
 		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", wireThinkingLevel(config.Level))
 		}
 		return result, nil
 	}
@@ -99,7 +111,7 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 		return body, nil
 	}
 
-	level := string(config.Level)
+	level := wireThinkingLevel(config.Level)
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", level)
 
 	// Respect user's explicit includeThoughts setting from original body; default to true if not set
