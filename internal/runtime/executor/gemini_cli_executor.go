@@ -453,6 +453,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					if bytes.HasPrefix(line, dataTag) {
 						diag.observe(line)
 						segments := sdktranslator.TranslateStream(respCtx, to, responseFormat, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param)
+						diag.observeOut(segments)
 						for i := range segments {
 							select {
 							case out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}:
@@ -813,6 +814,10 @@ type geminiCLIStreamDiag struct {
 	candTok    int64
 	promptTok  int64
 	funcNames  []string
+
+	outEvents    []string
+	outToolNames []string
+	outToolIDs   []string
 }
 
 func newGeminiCLIStreamDiag() *geminiCLIStreamDiag {
@@ -870,6 +875,38 @@ func (d *geminiCLIStreamDiag) observe(line []byte) {
 	}
 }
 
+// observeOut records what we actually hand back to the client, which is the side
+// that was never instrumented while the upstream side was.
+func (d *geminiCLIStreamDiag) observeOut(segments [][]byte) {
+	if d == nil {
+		return
+	}
+	for _, seg := range segments {
+		for _, line := range bytes.Split(seg, []byte("\n")) {
+			if !bytes.HasPrefix(line, dataTag) {
+				continue
+			}
+			payload := bytes.TrimSpace(bytes.TrimPrefix(line, dataTag))
+			evt := gjson.GetBytes(payload, "type").String()
+			if evt == "" {
+				continue
+			}
+			if blockType := gjson.GetBytes(payload, "content_block.type").String(); blockType != "" {
+				evt = evt + ":" + blockType
+				if name := gjson.GetBytes(payload, "content_block.name").String(); name != "" {
+					evt = evt + "(" + name + ")"
+					d.outToolNames = append(d.outToolNames, name)
+					d.outToolIDs = append(d.outToolIDs, gjson.GetBytes(payload, "content_block.id").String())
+				}
+			}
+			if stop := gjson.GetBytes(payload, "delta.stop_reason").String(); stop != "" {
+				evt = evt + "(" + stop + ")"
+			}
+			d.outEvents = append(d.outEvents, evt)
+		}
+	}
+}
+
 func (d *geminiCLIStreamDiag) report() {
 	if d == nil || d.chunks == 0 {
 		return
@@ -882,6 +919,7 @@ func (d *geminiCLIStreamDiag) report() {
 		d.chunks, d.textParts, d.thoughts, d.funcCalls, d.signatures, d.textLen,
 		d.finish, d.thoughtTok, d.candTok, d.promptTok, d.funcNames)
 	log.Debugf("gemini-cli diag: text-head | %q", head)
+	log.Debugf("gemini-cli diag: out | events=%v toolNames=%v toolIDs=%v", d.outEvents, d.outToolNames, d.outToolIDs)
 }
 
 // emptyAsNone renders an absent JSON value as a visible marker.

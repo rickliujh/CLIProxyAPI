@@ -255,3 +255,37 @@ func TestConvertGeminiCLIResponseToClaudeNonStream_ThinkingSuppressedWhenNotRequ
 		t.Fatalf("thinking must appear when the client requested it: %s", out)
 	}
 }
+
+// The shape observed from cloudcode-pa for a tool-calling turn: an empty-text
+// part carrying a thought signature, then a functionCall with finishReason STOP.
+// It must translate into a complete Anthropic tool_use turn.
+func TestConvertGeminiCLIResponseToClaude_ObservedToolCallStream(t *testing.T) {
+	req := []byte(`{"model":"gemini-3.5-flash","thinking":{"type":"adaptive"},
+		"tools":[{"name":"Read","description":"read","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"read the file"}]}]}`)
+	signatureChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[
+		{"text":"","thoughtSignature":"sig-abc"}]}}],
+		"modelVersion":"gemini-3.5-flash","responseId":"r"}}`)
+	callChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[
+		{"functionCall":{"name":"Read","args":{"path":"/tmp/x"}}}]},"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":220056,"candidatesTokenCount":39},
+		"modelVersion":"gemini-3.5-flash","responseId":"r"}}`)
+
+	out := convertStream(t, req, signatureChunk, callChunk, []byte("[DONE]"))
+
+	for _, want := range []string{
+		`"content_block":{"type":"tool_use"`,
+		`"name":"Read"`,
+		`"type":"input_json_delta"`,
+		`"stop_reason":"tool_use"`,
+		`"type":"message_stop"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %s in translated stream: %s", want, out)
+		}
+	}
+	// The signature carrier must not become a visible text block.
+	if strings.Contains(out, `"content_block":{"type":"text"`) {
+		t.Fatalf("signature carrier opened a text block: %s", out)
+	}
+}
