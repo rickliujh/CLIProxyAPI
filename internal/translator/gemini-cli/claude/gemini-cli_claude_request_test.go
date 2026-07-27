@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -266,5 +268,61 @@ func TestConvertClaudeRequestToCLI_ToolResultWithoutToolUseFallsBack(t *testing.
 	out := ConvertClaudeRequestToCLI("gemini-3.5-flash", inputJSON, true)
 	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionResponse.name").String(); got != "Read" {
 		t.Errorf("fallback recovery = %q, want %q", got, "Read")
+	}
+}
+
+// Gemini 3 carries reasoning state across turns in the thought signature attached
+// to a function call. Anthropic tool_use blocks have nowhere to carry it, so it is
+// stashed against the tool id at response time and replayed here. Sending the
+// synthetic constant instead only suppresses validation and loses the state, which
+// forces the model to re-reason in visible text on every turn.
+func TestConvertClaudeRequestToCLI_ReplaysRealThoughtSignature(t *testing.T) {
+	const model = "gemini-3.5-flash"
+	req := []byte(`{"model":"` + model + `","thinking":{"type":"adaptive"},
+		"tools":[{"name":"Read","description":"read","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"read it"}]}]}`)
+	callChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[
+		{"functionCall":{"name":"Read","args":{"path":"/tmp/x"}},"thoughtSignature":"CvcBAdHtim9Xr4uPq2mKzR8wJvLb3NcQeT5yHgFdSaZxMvBnKjHgFdEwQzXcVbNmAsDfGhJkLpOiUyTrEwQzXcVbNm"}]},
+		"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5},
+		"modelVersion":"` + model + `","responseId":"r"}}`)
+
+	// Response side mints the id and should stash the signature against it.
+	var param any
+	var sse strings.Builder
+	for _, seg := range ConvertGeminiCLIResponseToClaude(context.Background(), model, req, req, callChunk, &param) {
+		sse.Write(seg)
+	}
+	toolID := gjson.Get(sse.String()[strings.Index(sse.String(), `{"type":"content_block_start"`):], "content_block.id").String()
+	if toolID == "" {
+		t.Fatalf("no tool_use id minted: %s", sse.String())
+	}
+
+	// Next turn: the client echoes the tool_use back.
+	follow := []byte(`{"model":"` + model + `","thinking":{"type":"adaptive"},
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"read it"}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"` + toolID + `","name":"Read","input":{"path":"/tmp/x"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + toolID + `","content":"body"}]}
+		]}`)
+
+	out := ConvertClaudeRequestToCLI(model, follow, true)
+	got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String()
+	if got == geminiCLIClaudeThoughtSignature {
+		t.Fatalf("replayed the synthetic placeholder instead of the real signature; reasoning state is lost")
+	}
+	if got != "CvcBAdHtim9Xr4uPq2mKzR8wJvLb3NcQeT5yHgFdSaZxMvBnKjHgFdEwQzXcVbNmAsDfGhJkLpOiUyTrEwQzXcVbNm" {
+		t.Fatalf("thoughtSignature = %q, want %q", got, "CvcBAdHtim9Xr4uPq2mKzR8wJvLb3NcQeT5yHgFdSaZxMvBnKjHgFdEwQzXcVbNmAsDfGhJkLpOiUyTrEwQzXcVbNm")
+	}
+}
+
+// With no cached signature the synthetic constant is still the correct fallback.
+func TestConvertClaudeRequestToCLI_FallsBackToSyntheticSignature(t *testing.T) {
+	req := []byte(`{"model":"gemini-3.5-flash","messages":[
+		{"role":"assistant","content":[{"type":"tool_use","id":"Unknown-999-1","name":"Read","input":{}}]}
+	]}`)
+	out := ConvertClaudeRequestToCLI("gemini-3.5-flash", req, true)
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.thoughtSignature").String(); got != geminiCLIClaudeThoughtSignature {
+		t.Fatalf("fallback signature = %q, want %q", got, geminiCLIClaudeThoughtSignature)
 	}
 }

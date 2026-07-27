@@ -12,7 +12,7 @@ import (
 
 const (
 	// GeminiCLIVersion is the version string reported in the User-Agent for upstream requests.
-	GeminiCLIVersion = "0.34.0"
+	GeminiCLIVersion = "0.52.0"
 
 	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"

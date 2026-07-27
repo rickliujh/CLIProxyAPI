@@ -8,6 +8,7 @@ package claude
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -122,8 +123,18 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
+							// Replay the signature Gemini issued with this call so the
+							// model can resume its reasoning chain. The synthetic
+							// constant only suppresses validation and carries no state,
+							// so it is a fallback, matching how the Gemini CLI itself
+							// treats it (historyHardening.ts injects it only when a real
+							// signature is missing).
+							signature := geminiCLIClaudeThoughtSignature
+							if cached := cache.GetCachedSignature(modelName, contentResult.Get("id").String()); cached != "" {
+								signature = cached
+							}
 							part := []byte(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
-							part, _ = sjson.SetBytes(part, "thoughtSignature", geminiCLIClaudeThoughtSignature)
+							part, _ = sjson.SetBytes(part, "thoughtSignature", signature)
 							part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
 							part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(functionArgs))
 							contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)

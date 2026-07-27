@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -42,6 +43,16 @@ type Params struct {
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
+
+// geminiCLIPartSignature returns the thought signature attached to a part, in
+// either the camelCase or snake_case spelling.
+func geminiCLIPartSignature(part gjson.Result) string {
+	signature := part.Get("thoughtSignature")
+	if !signature.Exists() {
+		signature = part.Get("thought_signature")
+	}
+	return strings.TrimSpace(signature.String())
+}
 
 // claudeThinkingRequested reports whether the originating Claude request opted in
 // to extended thinking. The Anthropic API only returns thinking blocks when the
@@ -76,7 +87,7 @@ func claudeThinkingRequested(originalRequestRawJSON []byte) bool {
 //
 // Returns:
 //   - [][]byte: A slice of bytes, each containing a Claude Code-compatible SSE payload.
-func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertGeminiCLIResponseToClaude(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &Params{
 			HasFirstResponse:  false,
@@ -264,7 +275,15 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 				// This creates the structure for a function call in Claude Code format
 				// Create the tool use block with unique ID and function details
 				data := []byte(fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, (*param).(*Params).ResponseIndex))
-				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))))
+				toolUseID := util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1)))
+				// Gemini 3 carries reasoning state across turns in the thought
+				// signature attached to a function call. Anthropic tool_use blocks
+				// have nowhere to put it, so stash it against the tool id, which the
+				// client does echo back, and replay it when the result returns.
+				if signature := geminiCLIPartSignature(partResult); signature != "" {
+					cache.CacheSignature(modelName, toolUseID, signature)
+				}
+				data, _ = sjson.SetBytes(data, "content_block.id", toolUseID)
 				data, _ = sjson.SetBytes(data, "content_block.name", fcName)
 				appendEvent("content_block_start", string(data))
 
