@@ -301,13 +301,24 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if log.IsLevelEnabled(log.DebugLevel) {
 		// The global formatter only renders whitelisted field names, so everything
 		// diagnostic has to live in the message itself.
-		log.Debugf("gemini-cli diag: request | client_thinking=%s client_effort=%q client_maxtokens=%d upstream_thinkingConfig=%s upstream_maxOutputTokens=%s origLen=%d",
+		clientTools := gjson.GetBytes(opts.OriginalRequest, "tools")
+		upstreamDecls := gjson.GetBytes(basePayload, "request.tools.0.functionDeclarations")
+		firstDecl := ""
+		if upstreamDecls.IsArray() && len(upstreamDecls.Array()) > 0 {
+			firstDecl = upstreamDecls.Array()[0].Get("name").String()
+		}
+		log.Debugf("gemini-cli diag: request | client_thinking=%s client_effort=%q client_maxtokens=%d upstream_thinkingConfig=%s upstream_maxOutputTokens=%s origLen=%d clientTools=%d upstreamTools=%d firstTool=%q toolConfig=%s systemLen=%d",
 			emptyAsNone(gjson.GetBytes(opts.OriginalRequest, "thinking").Raw),
 			gjson.GetBytes(opts.OriginalRequest, "output_config.effort").String(),
 			gjson.GetBytes(opts.OriginalRequest, "max_tokens").Int(),
 			emptyAsNone(gjson.GetBytes(basePayload, "request.generationConfig.thinkingConfig").Raw),
 			emptyAsNone(gjson.GetBytes(basePayload, "request.generationConfig.maxOutputTokens").Raw),
-			len(opts.OriginalRequest))
+			len(opts.OriginalRequest),
+			len(clientTools.Array()),
+			len(upstreamDecls.Array()),
+			firstDecl,
+			emptyAsNone(gjson.GetBytes(basePayload, "request.toolConfig").Raw),
+			len(gjson.GetBytes(basePayload, "request.systemInstruction").Raw))
 	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
