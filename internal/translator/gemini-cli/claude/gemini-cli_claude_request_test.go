@@ -184,3 +184,42 @@ func TestConvertClaudeRequestToCLI_StringToolResult(t *testing.T) {
 		t.Fatalf("expected result 'alpha', got '%s' (raw=%s)", got, fr.Get("response.result").Raw)
 	}
 }
+
+// Gemini 3 models reason whether or not they are asked to. When the client did not
+// opt in to extended thinking, the backend must be told to withhold thought parts
+// so no reasoning comes back that has no valid place in a Claude response.
+func TestConvertClaudeRequestToCLI_DisablesThoughtsWhenThinkingNotRequested(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`)
+
+	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+
+	include := gjson.GetBytes(output, "request.generationConfig.thinkingConfig.includeThoughts")
+	if !include.Exists() {
+		t.Fatalf("expected includeThoughts to be set, generationConfig=%s",
+			gjson.GetBytes(output, "request.generationConfig").Raw)
+	}
+	if include.Bool() {
+		t.Fatalf("expected includeThoughts=false when thinking was not requested, got true")
+	}
+}
+
+func TestConvertClaudeRequestToCLI_KeepsThoughtsWhenThinkingRequested(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"thinking": {"type": "enabled", "budget_tokens": 2048},
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`)
+
+	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+
+	if !gjson.GetBytes(output, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("expected includeThoughts=true when thinking was requested, generationConfig=%s",
+			gjson.GetBytes(output, "request.generationConfig").Raw)
+	}
+	if got := gjson.GetBytes(output, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 2048 {
+		t.Fatalf("expected thinkingBudget 2048, got %d", got)
+	}
+}

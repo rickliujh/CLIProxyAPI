@@ -217,6 +217,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 
 	// Map Anthropic thinking -> Gemini CLI thinkingConfig when enabled
 	// Translator only does format conversion, ApplyThinking handles model capability validation.
+	thinkingEnabled := false
 	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
 		switch t.Get("type").String() {
 		case "enabled":
@@ -224,6 +225,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+				thinkingEnabled = true
 			}
 		case "adaptive", "auto":
 			// For adaptive thinking:
@@ -240,7 +242,14 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
 			}
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+			thinkingEnabled = true
 		}
+	}
+	// The client did not opt in to extended thinking. Gemini 3 models reason
+	// regardless, so ask the backend to withhold thought parts rather than
+	// returning reasoning that has no valid representation in the response.
+	if !thinkingEnabled {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", false)
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.temperature", v.Num)

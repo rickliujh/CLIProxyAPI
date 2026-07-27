@@ -31,12 +31,34 @@ type Params struct {
 	SawToolCall      bool // Tracks whether any chunk in this stream emitted a tool call
 	HasFinalEvents   bool // Guards against emitting the terminal events more than once
 
+	// ThinkingRequested records whether the originating Claude request opted in to
+	// extended thinking. When it did not, reasoning returned by the backend must
+	// not be surfaced as thinking blocks.
+	ThinkingRequested bool
+
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
 	ToolNameMap map[string]string
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
+
+// claudeThinkingRequested reports whether the originating Claude request opted in
+// to extended thinking. The Anthropic API only returns thinking blocks when the
+// client asks for them, so a client that did not opt in has no way to render one
+// and will treat the reasoning as the assistant's answer.
+func claudeThinkingRequested(originalRequestRawJSON []byte) bool {
+	thinkingResult := gjson.GetBytes(originalRequestRawJSON, "thinking")
+	if !thinkingResult.Exists() || !thinkingResult.IsObject() {
+		return false
+	}
+	switch thinkingResult.Get("type").String() {
+	case "enabled", "adaptive", "auto":
+		return true
+	default:
+		return false
+	}
+}
 
 // ConvertGeminiCLIResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
@@ -57,10 +79,11 @@ var toolUseIDCounter uint64
 func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &Params{
-			HasFirstResponse: false,
-			ResponseType:     0,
-			ResponseIndex:    0,
-			ToolNameMap:      util.SanitizedToolNameMap(originalRequestRawJSON),
+			HasFirstResponse:  false,
+			ResponseType:      0,
+			ResponseIndex:     0,
+			ToolNameMap:       util.SanitizedToolNameMap(originalRequestRawJSON),
+			ThinkingRequested: claudeThinkingRequested(originalRequestRawJSON),
 		}
 	}
 
@@ -134,8 +157,15 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
+				isThought := partResult.Get("thought").Bool() || hasThoughtSignature
+				// The client did not ask for extended thinking, so reasoning has no
+				// valid representation in the response. Drop it rather than emitting
+				// a thinking block the client cannot render.
+				if isThought && !(*param).(*Params).ThinkingRequested {
+					continue
+				}
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() || hasThoughtSignature {
+				if isThought {
 					// An empty text part with a signature carries no thinking content
 					// of its own; attach it to the open block rather than emitting an
 					// empty thinking delta.
@@ -292,6 +322,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 //   - []byte: A Claude-compatible JSON response.
 func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	toolNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	thinkingRequested := claudeThinkingRequested(originalRequestRawJSON)
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
@@ -335,6 +366,10 @@ func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, orig
 		for _, part := range parts.Array() {
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
 				if part.Get("thought").Bool() {
+					// Drop reasoning when the client did not opt in to thinking.
+					if !thinkingRequested {
+						continue
+					}
 					flushText()
 					thinkingBuilder.WriteString(text.String())
 					continue
