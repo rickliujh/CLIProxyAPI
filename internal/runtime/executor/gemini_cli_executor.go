@@ -299,13 +299,15 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 
 	if log.IsLevelEnabled(log.DebugLevel) {
-		log.WithFields(log.Fields{
-			"client_thinking":  gjson.GetBytes(opts.OriginalRequest, "thinking").Raw,
-			"client_effort":    gjson.GetBytes(opts.OriginalRequest, "output_config.effort").String(),
-			"client_maxtokens": gjson.GetBytes(opts.OriginalRequest, "max_tokens").Int(),
-			"upstream_thought": gjson.GetBytes(basePayload, "request.generationConfig.thinkingConfig").Raw,
-			"upstream_maxout":  gjson.GetBytes(basePayload, "request.generationConfig.maxOutputTokens").Raw,
-		}).Debug("gemini-cli diag: request |")
+		// The global formatter only renders whitelisted field names, so everything
+		// diagnostic has to live in the message itself.
+		log.Debugf("gemini-cli diag: request | client_thinking=%s client_effort=%q client_maxtokens=%d upstream_thinkingConfig=%s upstream_maxOutputTokens=%s origLen=%d",
+			emptyAsNone(gjson.GetBytes(opts.OriginalRequest, "thinking").Raw),
+			gjson.GetBytes(opts.OriginalRequest, "output_config.effort").String(),
+			gjson.GetBytes(opts.OriginalRequest, "max_tokens").Int(),
+			emptyAsNone(gjson.GetBytes(basePayload, "request.generationConfig.thinkingConfig").Raw),
+			emptyAsNone(gjson.GetBytes(basePayload, "request.generationConfig.maxOutputTokens").Raw),
+			len(opts.OriginalRequest))
 	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
@@ -800,14 +802,21 @@ func logGeminiCLIChunkDiag(line []byte) {
 		return true
 	})
 	usage := gjson.GetBytes(payload, "response.usageMetadata")
-	log.WithFields(log.Fields{
-		"parts":      strings.Join(shapes, ","),
-		"finish":     gjson.GetBytes(payload, "response.candidates.0.finishReason").String(),
-		"thoughtTok": usage.Get("thoughtsTokenCount").Int(),
-		"candTok":    usage.Get("candidatesTokenCount").Int(),
-		"promptTok":  usage.Get("promptTokenCount").Int(),
-		"hasUsage":   usage.Exists(),
-	}).Debug("gemini-cli diag: chunk |")
+	log.Debugf("gemini-cli diag: chunk | parts=[%s] finish=%q thoughtTok=%d candTok=%d promptTok=%d hasUsage=%t",
+		strings.Join(shapes, " "),
+		gjson.GetBytes(payload, "response.candidates.0.finishReason").String(),
+		usage.Get("thoughtsTokenCount").Int(),
+		usage.Get("candidatesTokenCount").Int(),
+		usage.Get("promptTokenCount").Int(),
+		usage.Exists())
+}
+
+// emptyAsNone renders an absent JSON value as a visible marker.
+func emptyAsNone(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "<none>"
+	}
+	return raw
 }
 
 func resolveGeminiProjectID(auth *cliproxyauth.Auth) string {
