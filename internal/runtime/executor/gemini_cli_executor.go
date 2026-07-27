@@ -298,6 +298,16 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, err
 	}
 
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"client_thinking":  gjson.GetBytes(opts.OriginalRequest, "thinking").Raw,
+			"client_effort":    gjson.GetBytes(opts.OriginalRequest, "output_config.effort").String(),
+			"client_maxtokens": gjson.GetBytes(opts.OriginalRequest, "max_tokens").Int(),
+			"upstream_thought": gjson.GetBytes(basePayload, "request.generationConfig.thinkingConfig").Raw,
+			"upstream_maxout":  gjson.GetBytes(basePayload, "request.generationConfig.maxOutputTokens").Raw,
+		}).Debug("gemini-cli diag: request |")
+	}
+
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -417,6 +427,9 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 						reporter.Publish(ctx, detail)
 					}
 					if bytes.HasPrefix(line, dataTag) {
+						if log.IsLevelEnabled(log.DebugLevel) {
+							logGeminiCLIChunkDiag(line)
+						}
 						segments := sdktranslator.TranslateStream(respCtx, to, responseFormat, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param)
 						for i := range segments {
 							select {
@@ -759,6 +772,42 @@ func buildGeminiTokenFields(tok *oauth2.Token, merged map[string]any) map[string
 		fields["token"] = cloneMap(merged)
 	}
 	return fields
+}
+
+// logGeminiCLIChunkDiag summarises one upstream SSE chunk: the shape of every
+// part and the finish/usage fields. Temporary diagnostic for tracking down turns
+// that end with reasoning and no answer.
+func logGeminiCLIChunkDiag(line []byte) {
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, dataTag))
+	if len(payload) == 0 {
+		return
+	}
+	shapes := make([]string, 0, 4)
+	gjson.GetBytes(payload, "response.candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
+		kind := "other"
+		switch {
+		case part.Get("functionCall").Exists():
+			kind = "functionCall"
+		case part.Get("thought").Bool():
+			kind = "thought"
+		case part.Get("text").Exists():
+			kind = "text"
+		}
+		shapes = append(shapes, fmt.Sprintf("%s(len=%d,sig=%t)",
+			kind,
+			len(part.Get("text").String()),
+			part.Get("thoughtSignature").Exists() || part.Get("thought_signature").Exists()))
+		return true
+	})
+	usage := gjson.GetBytes(payload, "response.usageMetadata")
+	log.WithFields(log.Fields{
+		"parts":      strings.Join(shapes, ","),
+		"finish":     gjson.GetBytes(payload, "response.candidates.0.finishReason").String(),
+		"thoughtTok": usage.Get("thoughtsTokenCount").Int(),
+		"candTok":    usage.Get("candidatesTokenCount").Int(),
+		"promptTok":  usage.Get("promptTokenCount").Int(),
+		"hasUsage":   usage.Exists(),
+	}).Debug("gemini-cli diag: chunk |")
 }
 
 func resolveGeminiProjectID(auth *cliproxyauth.Auth) string {
