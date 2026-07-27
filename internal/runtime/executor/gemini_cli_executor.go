@@ -319,6 +319,15 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			firstDecl,
 			emptyAsNone(gjson.GetBytes(basePayload, "request.toolConfig").Raw),
 			len(gjson.GetBytes(basePayload, "request.systemInstruction").Raw))
+		// The exact shape of one declaration as it leaves us, to show whether the
+		// schema survived cleanGeminiCLIRequestSchemas in a callable form.
+		if upstreamDecls.IsArray() && len(upstreamDecls.Array()) > 0 {
+			sample := upstreamDecls.Array()[0].Raw
+			if len(sample) > 600 {
+				sample = sample[:600] + "...(truncated)"
+			}
+			log.Debugf("gemini-cli diag: firstToolDecl | %s", sample)
+		}
 	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
@@ -433,6 +442,8 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
+				diag := newGeminiCLIStreamDiag()
+				defer diag.report()
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -440,9 +451,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 						reporter.Publish(ctx, detail)
 					}
 					if bytes.HasPrefix(line, dataTag) {
-						if log.IsLevelEnabled(log.DebugLevel) {
-							logGeminiCLIChunkDiag(line)
-						}
+						diag.observe(line)
 						segments := sdktranslator.TranslateStream(respCtx, to, responseFormat, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param)
 						for i := range segments {
 							select {
@@ -787,39 +796,92 @@ func buildGeminiTokenFields(tok *oauth2.Token, merged map[string]any) map[string
 	return fields
 }
 
-// logGeminiCLIChunkDiag summarises one upstream SSE chunk: the shape of every
-// part and the finish/usage fields. Temporary diagnostic for tracking down turns
-// that end with reasoning and no answer.
-func logGeminiCLIChunkDiag(line []byte) {
+// geminiCLIStreamDiag accumulates one summary per stream instead of logging every
+// chunk. Temporary scaffolding for the "model narrates instead of calling tools"
+// investigation.
+type geminiCLIStreamDiag struct {
+	chunks     int
+	textParts  int
+	thoughts   int
+	funcCalls  int
+	signatures int
+	textLen    int
+	head       strings.Builder
+	tail       strings.Builder
+	finish     string
+	thoughtTok int64
+	candTok    int64
+	promptTok  int64
+	funcNames  []string
+}
+
+func newGeminiCLIStreamDiag() *geminiCLIStreamDiag {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return nil
+	}
+	return &geminiCLIStreamDiag{}
+}
+
+func (d *geminiCLIStreamDiag) observe(line []byte) {
+	if d == nil {
+		return
+	}
 	payload := bytes.TrimSpace(bytes.TrimPrefix(line, dataTag))
 	if len(payload) == 0 {
 		return
 	}
-	shapes := make([]string, 0, 4)
+	d.chunks++
 	gjson.GetBytes(payload, "response.candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
-		kind := "other"
+		if part.Get("thoughtSignature").Exists() || part.Get("thought_signature").Exists() {
+			d.signatures++
+		}
 		switch {
 		case part.Get("functionCall").Exists():
-			kind = "functionCall"
+			d.funcCalls++
+			if name := part.Get("functionCall.name").String(); name != "" && len(d.funcNames) < 8 {
+				d.funcNames = append(d.funcNames, name)
+			}
 		case part.Get("thought").Bool():
-			kind = "thought"
+			d.thoughts++
 		case part.Get("text").Exists():
-			kind = "text"
+			text := part.Get("text").String()
+			d.textParts++
+			d.textLen += len(text)
+			if d.head.Len() < 300 {
+				d.head.WriteString(text)
+			}
+			d.tail.Reset()
+			d.tail.WriteString(text)
 		}
-		shapes = append(shapes, fmt.Sprintf("%s(len=%d,sig=%t)",
-			kind,
-			len(part.Get("text").String()),
-			part.Get("thoughtSignature").Exists() || part.Get("thought_signature").Exists()))
 		return true
 	})
+	if finish := gjson.GetBytes(payload, "response.candidates.0.finishReason").String(); finish != "" {
+		d.finish = finish
+	}
 	usage := gjson.GetBytes(payload, "response.usageMetadata")
-	log.Debugf("gemini-cli diag: chunk | parts=[%s] finish=%q thoughtTok=%d candTok=%d promptTok=%d hasUsage=%t",
-		strings.Join(shapes, " "),
-		gjson.GetBytes(payload, "response.candidates.0.finishReason").String(),
-		usage.Get("thoughtsTokenCount").Int(),
-		usage.Get("candidatesTokenCount").Int(),
-		usage.Get("promptTokenCount").Int(),
-		usage.Exists())
+	if v := usage.Get("thoughtsTokenCount").Int(); v > 0 {
+		d.thoughtTok = v
+	}
+	if v := usage.Get("candidatesTokenCount").Int(); v > 0 {
+		d.candTok = v
+	}
+	if v := usage.Get("promptTokenCount").Int(); v > 0 {
+		d.promptTok = v
+	}
+}
+
+func (d *geminiCLIStreamDiag) report() {
+	if d == nil || d.chunks == 0 {
+		return
+	}
+	head := d.head.String()
+	if len(head) > 300 {
+		head = head[:300]
+	}
+	log.Debugf("gemini-cli diag: stream | chunks=%d textParts=%d thoughtParts=%d funcCalls=%d signatures=%d textLen=%d finish=%q thoughtTok=%d candTok=%d promptTok=%d funcNames=%v",
+		d.chunks, d.textParts, d.thoughts, d.funcCalls, d.signatures, d.textLen,
+		d.finish, d.thoughtTok, d.candTok, d.promptTok, d.funcNames)
+	log.Debugf("gemini-cli diag: text-head | %q", head)
 }
 
 // emptyAsNone renders an absent JSON value as a visible marker.
