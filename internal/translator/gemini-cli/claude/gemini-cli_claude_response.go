@@ -157,7 +157,20 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
-				isThought := partResult.Get("thought").Bool() || hasThoughtSignature
+				// Only the thought flag marks a part as reasoning. A thoughtSignature
+				// is a multi-turn continuity token that Gemini also attaches to
+				// function calls and to ordinary answer parts, so treating it as a
+				// thinking marker would route the visible answer into a thinking
+				// block. See https://ai.google.dev/gemini-api/docs/thinking.
+				isThought := partResult.Get("thought").Bool()
+
+				// A part with a signature but no text of its own only annotates the
+				// thinking block that precedes it.
+				if hasThoughtSignature && partTextResult.String() == "" {
+					appendSignatureDelta(thoughtSignatureResult.String())
+					continue
+				}
+
 				// The client did not ask for extended thinking, so reasoning has no
 				// valid representation in the response. Drop it rather than emitting
 				// a thinking block the client cannot render.
@@ -166,13 +179,6 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 				}
 				// Process thinking content (internal reasoning)
 				if isThought {
-					// An empty text part with a signature carries no thinking content
-					// of its own; attach it to the open block rather than emitting an
-					// empty thinking delta.
-					if hasThoughtSignature && partTextResult.String() == "" {
-						appendSignatureDelta(thoughtSignatureResult.String())
-						continue
-					}
 					// Continue existing thinking block if already in thinking state
 					if (*param).(*Params).ResponseType == 2 {
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())

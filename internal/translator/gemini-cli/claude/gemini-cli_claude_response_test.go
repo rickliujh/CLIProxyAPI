@@ -167,6 +167,32 @@ func TestConvertGeminiCLIResponseToClaude_SignatureOnlyPartDoesNotOpenEmptyTextB
 	}
 }
 
+// thoughtSignature is a multi-turn continuity token, not a thinking marker: Gemini
+// attaches it to function calls and to ordinary answer parts too. Treating it as a
+// marker routes the visible answer into a thinking block, which is precisely the
+// "reasoning shown instead of the answer" failure.
+// See https://ai.google.dev/gemini-api/docs/thinking.
+func TestConvertGeminiCLIResponseToClaude_SignedAnswerPartStaysVisibleText(t *testing.T) {
+	chunk := []byte(`{"response":{
+		"candidates":[{"content":{"parts":[{"text":"the visible answer","thoughtSignature":"sig-x"}]},"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5},
+		"modelVersion":"gemini-test","responseId":"resp-test"}}`)
+
+	// Thinking enabled is the strictest case: the signature is meaningful here, so
+	// the part must still be classified by its thought flag alone.
+	out := convertStream(t, requestWithThinking, chunk, []byte("[DONE]"))
+
+	if strings.Contains(out, `"thinking_delta","thinking":"the visible answer"`) {
+		t.Fatalf("a signed answer part must not be routed into a thinking block: %s", out)
+	}
+	if !strings.Contains(out, `"text_delta","text":"the visible answer"`) {
+		t.Fatalf("a signed answer part must be delivered as visible text: %s", out)
+	}
+	if strings.Contains(out, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("no thinking block should be opened for a non-thought part: %s", out)
+	}
+}
+
 // A signature arriving on the same part as thinking text must annotate that block
 // rather than being dropped.
 func TestConvertGeminiCLIResponseToClaude_SignatureOnThinkingPartIsEmitted(t *testing.T) {
