@@ -61,7 +61,9 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		"project_id": ts.ProjectID,
 	}
 
-	fmt.Println("Gemini authentication successful")
+	// Note: the credential is not persisted yet; the caller still has to select a
+	// project and save the record. Avoid printing a "successful" message here so a
+	// later abort is not mistaken for a completed login.
 
 	return &coreauth.Auth{
 		ID:       fileName,

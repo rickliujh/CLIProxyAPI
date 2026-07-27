@@ -138,7 +138,13 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 			return
 		}
 		if len(projectSelections) == 0 {
-			log.Error("No project selected; aborting login.")
+			if len(projects) == 0 {
+				log.Error("No Google Cloud projects are visible for this account, so nothing was saved. " +
+					"Re-run the login and choose mode 2 (Google One) for a personal account, " +
+					"or pass --project_id <id> if you have a Code Assist project.")
+			} else {
+				log.Error("No project selected; aborting login. Nothing was saved.")
+			}
 			return
 		}
 
@@ -171,19 +177,28 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 	storage.Auto = false
 	storage.ProjectID = strings.Join(activatedProjects, ",")
 
-	if !storage.Auto && !storage.Checked {
+	// The Cloud AI API check is advisory: onboarding already produced a usable
+	// credential, so a failure here is recorded on the record rather than
+	// discarding the token and forcing the whole OAuth flow to be repeated.
+	if !storage.Checked {
+		checked := true
 		for _, pid := range activatedProjects {
 			isChecked, errCheck := checkCloudAPIIsEnabled(ctx, httpClient, pid)
 			if errCheck != nil {
-				log.Errorf("Failed to check if Cloud AI API is enabled for %s: %v", pid, errCheck)
-				return
+				log.Warnf("Could not verify the Cloud AI API for project %s: %v", pid, errCheck)
+				checked = false
+				break
 			}
 			if !isChecked {
-				log.Errorf("Failed to check if Cloud AI API is enabled for project %s. If you encounter an error message, please create an issue.", pid)
-				return
+				log.Warnf("Cloud AI API is not enabled for project %s.", pid)
+				checked = false
+				break
 			}
 		}
-		storage.Checked = true
+		storage.Checked = checked
+		if !checked {
+			log.Warn("Saving the credential anyway. If requests fail, enable 'cloudaicompanion.googleapis.com' on the project (it may require a billing account).")
+		}
 	}
 
 	updateAuthRecord(record, storage)
