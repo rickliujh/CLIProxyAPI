@@ -16,6 +16,29 @@ import (
 
 const geminiCLIClaudeThoughtSignature = "skip_thought_signature_validator"
 
+// toolUseNamesByID maps every tool_use id in the conversation to the function
+// name it was issued for. The assistant blocks carry both, so this is the
+// authoritative source; recovering the name by taking the id apart is not, since
+// the id format is not reversible for names that contain the separator.
+func toolUseNamesByID(rawJSON []byte) map[string]string {
+	names := make(map[string]string)
+	gjson.GetBytes(rawJSON, "messages").ForEach(func(_, message gjson.Result) bool {
+		message.Get("content").ForEach(func(_, content gjson.Result) bool {
+			if content.Get("type").String() != "tool_use" {
+				return true
+			}
+			id := strings.TrimSpace(content.Get("id").String())
+			name := strings.TrimSpace(content.Get("name").String())
+			if id != "" && name != "" {
+				names[id] = name
+			}
+			return true
+		})
+		return true
+	})
+	return names
+}
+
 // ConvertClaudeRequestToCLI parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini CLI API.
@@ -36,6 +59,7 @@ const geminiCLIClaudeThoughtSignature = "skip_thought_signature_validator"
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
+	toolUseNames := toolUseNamesByID(rawJSON)
 
 	// Build output Gemini CLI request JSON
 	out := []byte(`{"model":"","request":{"contents":[]}}`)
@@ -110,10 +134,18 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						if toolCallID == "" {
 							return true
 						}
-						funcName := toolCallID
-						toolCallIDs := strings.Split(toolCallID, "-")
-						if len(toolCallIDs) > 1 {
-							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+						funcName, resolved := toolUseNames[toolCallID]
+						if !resolved {
+							// No matching tool_use block: fall back to splitting the
+							// id. Ids are minted as name-<nanos>-<counter>, so drop
+							// the two generated trailing segments.
+							funcName = toolCallID
+							toolCallIDs := strings.Split(toolCallID, "-")
+							if len(toolCallIDs) > 2 {
+								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
+							} else if len(toolCallIDs) > 1 {
+								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+							}
 						}
 						toolResult := util.ConvertClaudeToolResultContent(contentResult.Get("content"))
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)

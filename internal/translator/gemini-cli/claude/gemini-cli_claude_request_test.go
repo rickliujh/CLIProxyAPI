@@ -223,3 +223,48 @@ func TestConvertClaudeRequestToCLI_KeepsThoughtsWhenThinkingRequested(t *testing
 		t.Fatalf("expected thinkingBudget 2048, got %d", got)
 	}
 }
+
+// Tool ids are minted as name-<nanos>-<counter>. Recovering the function name by
+// splitting the id left the generated suffix attached, so every functionResponse
+// named a function that was never declared. The model then sees its whole tool
+// history answered by unknown functions.
+func TestConvertClaudeRequestToCLI_ToolResultNameMatchesToolUse(t *testing.T) {
+	for _, toolName := range []string{"Read", "Bash", "some-hyphenated-tool"} {
+		toolID := toolName + "-1785194095218119402-1"
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"messages": [
+				{"role":"user","content":[{"type":"text","text":"hi"}]},
+				{"role":"assistant","content":[{"type":"tool_use","id":"` + toolID + `","name":"` + toolName + `","input":{}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + toolID + `","content":"ok"}]}
+			]
+		}`)
+
+		out := ConvertClaudeRequestToCLI("gemini-3.5-flash", inputJSON, true)
+
+		call := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.name").String()
+		response := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
+		if call != response {
+			t.Errorf("tool %q: functionCall.name=%q but functionResponse.name=%q; the names must match or the model sees a reply from an undeclared function",
+				toolName, call, response)
+		}
+		if response != toolName {
+			t.Errorf("tool %q: functionResponse.name=%q, want %q", toolName, response, toolName)
+		}
+	}
+}
+
+// A tool_use_id with no matching tool_use block still has to degrade sensibly.
+func TestConvertClaudeRequestToCLI_ToolResultWithoutToolUseFallsBack(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"messages": [
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"Read-1785194095218119402-1","content":"ok"}]}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToCLI("gemini-3.5-flash", inputJSON, true)
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionResponse.name").String(); got != "Read" {
+		t.Errorf("fallback recovery = %q, want %q", got, "Read")
+	}
+}
