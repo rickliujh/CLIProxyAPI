@@ -76,6 +76,17 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
+	// appendSignatureDelta attaches a thought signature to the thinking block that
+	// is currently open. Signatures are meaningless outside a thinking block, so
+	// this is a no-op in any other state.
+	appendSignatureDelta := func(signature string) {
+		if signature == "" || (*param).(*Params).ResponseType != 2 {
+			return
+		}
+		data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, (*param).(*Params).ResponseIndex)), "delta.signature", signature)
+		appendEvent("content_block_delta", string(data))
+		(*param).(*Params).HasContent = true
+	}
 
 	// Initialize the streaming session with a message_start event
 	// This is only sent for the very first response chunk to establish the streaming session
@@ -107,11 +118,31 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+
+			// A part carrying only a thought signature annotates the thinking block
+			// that precedes it. Falling through would open an empty text block and
+			// terminate the thinking block, leaving the turn with no visible answer.
+			if hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
+				appendSignatureDelta(thoughtSignatureResult.String())
+				continue
+			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() {
+				if partResult.Get("thought").Bool() || hasThoughtSignature {
+					// An empty text part with a signature carries no thinking content
+					// of its own; attach it to the open block rather than emitting an
+					// empty thinking delta.
+					if hasThoughtSignature && partTextResult.String() == "" {
+						appendSignatureDelta(thoughtSignatureResult.String())
+						continue
+					}
 					// Continue existing thinking block if already in thinking state
 					if (*param).(*Params).ResponseType == 2 {
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
@@ -137,6 +168,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
 						(*param).(*Params).HasContent = true
 					}
+					appendSignatureDelta(thoughtSignatureResult.String())
 				} else {
 					// Process regular text content (user-visible output)
 					// Continue existing text block if already in content state

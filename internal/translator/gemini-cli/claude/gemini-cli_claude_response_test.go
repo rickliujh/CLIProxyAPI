@@ -90,6 +90,54 @@ func TestConvertGeminiCLIResponseToClaude_ToolCallAcrossChunksSetsStopReason(t *
 	}
 }
 
+// Gemini emits the thought signature as its own part with empty text. Treating it
+// as regular text closes the thinking block and opens an empty text block, so the
+// turn ends with the reasoning as its only visible content and no answer.
+func TestConvertGeminiCLIResponseToClaude_SignatureOnlyPartDoesNotOpenEmptyTextBlock(t *testing.T) {
+	thinkingChunk := []byte(`{"response":{
+		"candidates":[{"content":{"parts":[{"text":"reasoning about it","thought":true}]}}],
+		"modelVersion":"gemini-test","responseId":"resp-test"}}`)
+	signatureChunk := []byte(`{"response":{
+		"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-test"}]}}],
+		"modelVersion":"gemini-test","responseId":"resp-test"}}`)
+	answerChunk := []byte(`{"response":{
+		"candidates":[{"content":{"parts":[{"text":"the answer"}]},"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":7,"totalTokenCount":22},
+		"modelVersion":"gemini-test","responseId":"resp-test"}}`)
+
+	out := convertStream(t, thinkingChunk, signatureChunk, answerChunk, []byte("[DONE]"))
+
+	if !strings.Contains(out, `"type":"signature_delta"`) || !strings.Contains(out, `"signature":"sig-test"`) {
+		t.Fatalf("signature-only part must be emitted as a signature_delta: %s", out)
+	}
+	if got := strings.Count(out, `"content_block":{"type":"text"`); got != 1 {
+		t.Fatalf("expected exactly one text block, got %d: %s", got, out)
+	}
+	if got := strings.Count(out, `"content_block":{"type":"thinking"`); got != 1 {
+		t.Fatalf("expected exactly one thinking block, got %d: %s", got, out)
+	}
+	if !strings.Contains(out, `"text_delta","text":"the answer"`) {
+		t.Fatalf("the visible answer must survive the signature part: %s", out)
+	}
+}
+
+// A signature arriving on the same part as thinking text must annotate that block
+// rather than being dropped.
+func TestConvertGeminiCLIResponseToClaude_SignatureOnThinkingPartIsEmitted(t *testing.T) {
+	chunk := []byte(`{"response":{
+		"candidates":[{"content":{"parts":[{"text":"reasoning","thought":true,"thoughtSignature":"sig-inline"}]}}],
+		"modelVersion":"gemini-test","responseId":"resp-test"}}`)
+
+	out := convertStream(t, chunk)
+
+	if !strings.Contains(out, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected a thinking block: %s", out)
+	}
+	if !strings.Contains(out, `"signature":"sig-inline"`) {
+		t.Fatalf("inline thought signature must be emitted: %s", out)
+	}
+}
+
 // A turn that produced no content at all must not emit terminal events, so an
 // empty response is not reported to the client as a completed message.
 func TestConvertGeminiCLIResponseToClaude_NoContentEmitsNoFinalEvents(t *testing.T) {
