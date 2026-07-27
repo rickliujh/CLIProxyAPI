@@ -28,6 +28,8 @@ type Params struct {
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	SawToolCall      bool // Tracks whether any chunk in this stream emitted a tool call
+	HasFinalEvents   bool // Guards against emitting the terminal events more than once
 
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
 	ToolNameMap map[string]string
@@ -70,8 +72,6 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 		return [][]byte{}
 	}
 
-	// Track whether tools are being used in this response chunk
-	usedTool := false
 	output := make([]byte, 0, 1024)
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
@@ -168,7 +168,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 			} else if functionCallResult.Exists() {
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude Code API compatibility
-				usedTool = true
+				(*param).(*Params).SawToolCall = true
 				fcName := util.RestoreSanitizedToolName((*param).(*Params).ToolNameMap, functionCallResult.Get("name").String())
 
 				// Handle state transitions when switching to function calls
@@ -211,30 +211,37 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 	}
 
 	usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata")
-	// Process usage metadata and finish reason when present in the response
-	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) {
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			// Only send final events if we have actually output content
-			if (*param).(*Params).HasContent {
-				// Close the final content block
+	// Process usage metadata and finish reason when present in the response.
+	// candidatesTokenCount is deliberately not required here: a turn that spends
+	// its whole budget on thinking reports only thoughtsTokenCount, and gating on
+	// candidatesTokenCount would drop the terminal events and leave the stream
+	// without a stop_reason.
+	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) && !(*param).(*Params).HasFinalEvents {
+		// Only send final events if we have actually output content
+		if (*param).(*Params).HasContent {
+			// Close the final content block if one is still open
+			if (*param).(*Params).ResponseType != 0 {
 				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-
-				// Create the message delta template with appropriate stop reason
-				template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				// Set tool_use stop reason if tools were used in this response
-				if usedTool {
-					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				} else if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
-					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				}
-
-				// Include thinking tokens in output token count if present
-				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-				template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
-				template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
-
-				appendEvent("message_delta", string(template))
+				(*param).(*Params).ResponseType = 0
 			}
+
+			// Create the message delta template with appropriate stop reason
+			template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+			// Set tool_use stop reason if tools were used anywhere in this stream
+			if (*param).(*Params).SawToolCall {
+				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+			} else if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
+				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+			}
+
+			// Include thinking tokens in output token count if present
+			thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+			candidatesTokenCount := usageResult.Get("candidatesTokenCount").Int()
+			template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCount+thoughtsTokenCount)
+			template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+
+			appendEvent("message_delta", string(template))
+			(*param).(*Params).HasFinalEvents = true
 		}
 	}
 
