@@ -34,6 +34,11 @@ type modelStore struct {
 
 var modelsCatalogStore = &modelStore{}
 
+// embeddedCatalog holds the parsed embedded catalog for the lifetime of the
+// process. A remote refresh replaces the store wholesale, so this copy is what
+// mergeEmbeddedExtras uses to re-add models the remote catalog does not carry.
+var embeddedCatalog *staticModelsJSON
+
 var updaterOnce sync.Once
 
 // ModelRefreshCallback is invoked when startup or periodic model refresh detects changes.
@@ -68,7 +73,9 @@ func init() {
 	// Load embedded data as fallback on startup.
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
 		log.Warnf("registry: failed to parse embedded models.json (embedded catalog may be incomplete or invalid; continuing startup and will rely on remote model refresh): %v", err)
+		return
 	}
+	embeddedCatalog = getModels()
 }
 
 // StartModelsUpdater starts a background updater that fetches models
@@ -120,6 +127,10 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+
+	// Re-add embedded models the remote catalog omits before comparing, so the
+	// change detection sees the catalog that will actually be served.
+	mergeEmbeddedExtras(parsed)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -189,6 +200,64 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	return nil, ""
 }
 
+// modelSections returns a pointer to every provider slice in a catalog so
+// generic passes can walk them without repeating the field list.
+func modelSections(data *staticModelsJSON) []*[]*ModelInfo {
+	if data == nil {
+		return nil
+	}
+	return []*[]*ModelInfo{
+		&data.Claude,
+		&data.Gemini,
+		&data.Vertex,
+		&data.GeminiCLI,
+		&data.AIStudio,
+		&data.CodexFree,
+		&data.CodexTeam,
+		&data.CodexPlus,
+		&data.CodexPro,
+		&data.Kimi,
+		&data.Antigravity,
+		&data.XAI,
+	}
+}
+
+// mergeEmbeddedExtras appends embedded model definitions that the remote catalog
+// does not list, so models defined in this repo survive a refresh instead of
+// being dropped by the wholesale replacement. The remote stays authoritative for
+// every model it does define: entries are only added, never overwritten.
+//
+// The trade-off is that an embedded entry cannot be retired by the remote alone;
+// removing a model requires dropping it from models/models.json as well.
+func mergeEmbeddedExtras(remote *staticModelsJSON) {
+	if remote == nil || embeddedCatalog == nil {
+		return
+	}
+	remoteSections := modelSections(remote)
+	embeddedSections := modelSections(embeddedCatalog)
+	for i := range remoteSections {
+		remoteList := remoteSections[i]
+		known := make(map[string]struct{}, len(*remoteList))
+		for _, model := range *remoteList {
+			if model != nil {
+				known[model.ID] = struct{}{}
+			}
+		}
+		for _, model := range *embeddedSections[i] {
+			if model == nil {
+				continue
+			}
+			if _, exists := known[model.ID]; exists {
+				continue
+			}
+			known[model.ID] = struct{}{}
+			// Clone so the served catalog never aliases embeddedCatalog.
+			*remoteList = append(*remoteList, cloneModelInfo(model))
+			log.Debugf("registry: retaining embedded model %s missing from the remote catalog", model.ID)
+		}
+	}
+}
+
 // detectChangedProviders compares two model catalogs and returns provider names
 // whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
 // under a single "codex" provider.
@@ -207,6 +276,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"claude", oldData.Claude, newData.Claude},
 		{"gemini", oldData.Gemini, newData.Gemini},
 		{"vertex", oldData.Vertex, newData.Vertex},
+		{"gemini-cli", oldData.GeminiCLI, newData.GeminiCLI},
 		{"aistudio", oldData.AIStudio, newData.AIStudio},
 		{"codex", oldData.CodexFree, newData.CodexFree},
 		{"codex", oldData.CodexTeam, newData.CodexTeam},
@@ -327,6 +397,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "claude", models: data.Claude},
 		{name: "gemini", models: data.Gemini},
 		{name: "vertex", models: data.Vertex},
+		{name: "gemini-cli", models: data.GeminiCLI},
 		{name: "aistudio", models: data.AIStudio},
 		{name: "codex-free", models: data.CodexFree},
 		{name: "codex-team", models: data.CodexTeam},

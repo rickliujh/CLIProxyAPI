@@ -18,9 +18,9 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	authDir := t.TempDir()
-	fileName := "antigravity-user@example.com-project-a.json"
+	fileName := "gemini-user@example.com-project-a.json"
 	filePath := filepath.Join(authDir, fileName)
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"antigravity","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
 		t.Fatalf("failed to write auth file: %v", errWrite)
 	}
 
@@ -28,13 +28,13 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	record := &coreauth.Auth{
 		ID:       fileName,
 		FileName: fileName,
-		Provider: "antigravity",
+		Provider: "gemini-cli",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filePath,
 		},
 		Metadata: map[string]any{
-			"type":       "antigravity",
+			"type":       "gemini",
 			"email":      "user@example.com",
 			"project_id": "project-a",
 		},
@@ -56,8 +56,8 @@ func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	authDir := t.TempDir()
-	filePath := filepath.Join(authDir, "antigravity-user@example.com-project-a.json")
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"antigravity","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
+	filePath := filepath.Join(authDir, "gemini-user@example.com-project-a.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
 		t.Fatalf("failed to write auth file: %v", errWrite)
 	}
 
