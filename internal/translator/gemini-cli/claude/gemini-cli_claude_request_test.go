@@ -326,3 +326,54 @@ func TestConvertClaudeRequestToCLI_FallsBackToSyntheticSignature(t *testing.T) {
 		t.Fatalf("fallback signature = %q, want %q", got, geminiCLIClaudeThoughtSignature)
 	}
 }
+
+// Assistant thinking blocks must round-trip as thought parts. Dropping them costs
+// the model its reasoning state, so it re-derives the chain on every turn -- and
+// re-derives it as visible text.
+func TestConvertClaudeRequestToCLI_ReplaysThinkingBlocks(t *testing.T) {
+	const model = "gemini-3.5-flash"
+	req := []byte(`{"model":"` + model + `","thinking":{"type":"adaptive"},
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"why?"}]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"weighing the options","signature":"sig-abc"},
+				{"type":"text","text":"because"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"go on"}]}
+		]}`)
+
+	out := ConvertClaudeRequestToCLI(model, req, true)
+
+	part := gjson.GetBytes(out, "request.contents.1.parts.0")
+	if !part.Get("thought").Bool() {
+		t.Fatalf("thinking block did not round-trip as a thought part: %s", string(out))
+	}
+	if got := part.Get("text").String(); got != "weighing the options" {
+		t.Fatalf("thought text = %q, want %q", got, "weighing the options")
+	}
+	if got := part.Get("thoughtSignature").String(); got != "sig-abc" {
+		t.Fatalf("thoughtSignature = %q, want %q", got, "sig-abc")
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.1.text").String(); got != "because" {
+		t.Fatalf("visible text must follow the thought part, got %q", got)
+	}
+}
+
+// A thinking block with neither text nor signature carries nothing to replay.
+func TestConvertClaudeRequestToCLI_SkipsEmptyThinkingBlock(t *testing.T) {
+	const model = "gemini-3.5-flash"
+	req := []byte(`{"model":"` + model + `","thinking":{"type":"adaptive"},
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"why?"}]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"","signature":""},
+				{"type":"text","text":"because"}
+			]}
+		]}`)
+
+	out := ConvertClaudeRequestToCLI(model, req, true)
+
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.text").String(); got != "because" {
+		t.Fatalf("empty thinking block must be skipped, got parts: %s", gjson.GetBytes(out, "request.contents.1.parts").Raw)
+	}
+}

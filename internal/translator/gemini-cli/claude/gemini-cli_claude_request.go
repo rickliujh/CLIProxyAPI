@@ -118,6 +118,23 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						part, _ = sjson.SetBytes(part, "text", contentResult.Get("text").String())
 						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
+					case "thinking":
+						// Gemini 3 carries reasoning state across turns in thought parts
+						// and the signature attached to them. Anthropic thinking blocks
+						// hold the signature inline, so replay both; dropping them makes
+						// the model re-derive its reasoning on every turn, out loud.
+						thinkingText := contentResult.Get("thinking").String()
+						signature := contentResult.Get("signature").String()
+						if thinkingText == "" && signature == "" {
+							return true
+						}
+						part := []byte(`{"text":"","thought":true}`)
+						part, _ = sjson.SetBytes(part, "text", thinkingText)
+						if signature != "" {
+							part, _ = sjson.SetBytes(part, "thoughtSignature", signature)
+						}
+						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+
 					case "tool_use":
 						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						functionArgs := contentResult.Get("input").String()

@@ -354,7 +354,9 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	var lastStatus int
 	var lastBody []byte
 
-	for idx, attemptModel := range models {
+	emptyTurnRetries := 0
+	for idx := 0; idx < len(models); idx++ {
+		attemptModel := models[idx]
 		payload := append([]byte(nil), basePayload...)
 		payload = setJSONField(payload, "project", projectID)
 		payload = setJSONField(payload, "model", attemptModel)
@@ -428,8 +430,42 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			return nil, err
 		}
 
+		// Peek before committing the turn to the client. An upstream turn that
+		// carries nothing renderable arrives as a blank answer, and the client
+		// responds by asking the model to produce visible output -- which is what
+		// makes it restate its reasoning as ordinary text. Retry instead.
+		var pending [][]byte
+		var peekScanner *bufio.Scanner
+		if opts.Alt == "" {
+			countThoughts := geminiCLICountsThoughtsAsContent(responseFormat, opts.OriginalRequest)
+			peekScanner = bufio.NewScanner(httpResp.Body)
+			peekScanner.Buffer(nil, streamScannerBuffer)
+			renderable := false
+			for peekScanner.Scan() {
+				line := append([]byte(nil), peekScanner.Bytes()...)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				if detail, ok := helps.ParseGeminiCLIStreamUsage(line); ok {
+					reporter.Publish(ctx, detail)
+				}
+				pending = append(pending, line)
+				if bytes.HasPrefix(line, dataTag) && geminiCLIChunkHasRenderableContent(line, countThoughts) {
+					renderable = true
+					break
+				}
+			}
+			if !renderable && peekScanner.Err() == nil && emptyTurnRetries < maxGeminiCLIEmptyTurnRetries {
+				emptyTurnRetries++
+				log.Debugf("gemini cli executor: upstream turn carried no renderable content, retrying (%d/%d) with model %s", emptyTurnRetries, maxGeminiCLIEmptyTurnRetries, attemptModel)
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("gemini cli executor: close response body error: %v", errClose)
+				}
+				idx--
+				continue
+			}
+		}
+
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go func(resp *http.Response, reqBody []byte, attemptModel string) {
+		go func(resp *http.Response, reqBody []byte, attemptModel string, pending [][]byte, scanner *bufio.Scanner) {
 			defer close(out)
 			defer func() {
 				if errClose := resp.Body.Close(); errClose != nil {
@@ -437,11 +473,26 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 			}()
 			if opts.Alt == "" {
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
 				diag := newGeminiCLIStreamDiag()
 				defer diag.report()
+				// Lines consumed by the peek are already recorded; replay them through
+				// the translator in order before resuming the live scan.
+				for _, line := range pending {
+					if !bytes.HasPrefix(line, dataTag) {
+						continue
+					}
+					diag.observe(line)
+					segments := sdktranslator.TranslateStream(respCtx, to, responseFormat, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param)
+					diag.observeOut(segments)
+					for i := range segments {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -513,7 +564,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					return
 				}
 			}
-		}(httpResp, append([]byte(nil), payload...), attemptModel)
+		}(httpResp, append([]byte(nil), payload...), attemptModel, pending, peekScanner)
 
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
@@ -918,6 +969,60 @@ func (d *geminiCLIStreamDiag) report() {
 		d.finish, d.thoughtTok, d.candTok, d.promptTok, d.funcNames)
 	log.Debugf("gemini-cli diag: text-head | %q", head)
 	log.Debugf("gemini-cli diag: out | events=%v toolNames=%v toolIDs=%v", d.outEvents, d.outToolNames, d.outToolIDs)
+}
+
+// maxGeminiCLIEmptyTurnRetries bounds how many times a turn that produced nothing
+// renderable is re-requested before the empty result is forwarded to the client.
+const maxGeminiCLIEmptyTurnRetries = 2
+
+// geminiCLIChunkHasRenderableContent reports whether an upstream SSE chunk carries
+// anything the client can display: a function call, non-empty visible text, or a
+// thought part the client asked for. A chunk holding only usage metadata, an empty
+// text part, or a bare thought signature does not qualify.
+//
+// countThoughts must mirror what the response translator will keep. A Claude client
+// that did not opt in to extended thinking has reasoning dropped, so counting it
+// here would commit a turn that reaches the client blank.
+func geminiCLIChunkHasRenderableContent(line []byte, countThoughts bool) bool {
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, dataTag))
+	if len(payload) == 0 {
+		return false
+	}
+	renderable := false
+	gjson.GetBytes(payload, "response.candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
+		if part.Get("functionCall").Exists() {
+			renderable = true
+			return false
+		}
+		if part.Get("text").String() == "" {
+			return true
+		}
+		if part.Get("thought").Bool() && !countThoughts {
+			return true
+		}
+		renderable = true
+		return false
+	})
+	return renderable
+}
+
+// geminiCLICountsThoughtsAsContent reports whether reasoning survives translation
+// for this response format. Only the Claude path drops it, and only when the
+// originating request did not opt in to extended thinking.
+func geminiCLICountsThoughtsAsContent(responseFormat sdktranslator.Format, originalRequest []byte) bool {
+	if responseFormat != sdktranslator.FormatClaude {
+		return true
+	}
+	thinkingResult := gjson.GetBytes(originalRequest, "thinking")
+	if !thinkingResult.Exists() || !thinkingResult.IsObject() {
+		return false
+	}
+	switch thinkingResult.Get("type").String() {
+	case "enabled", "adaptive", "auto":
+		return true
+	default:
+		return false
+	}
 }
 
 // emptyAsNone renders an absent JSON value as a visible marker.

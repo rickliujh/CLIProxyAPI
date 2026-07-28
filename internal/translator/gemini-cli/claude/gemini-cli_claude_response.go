@@ -99,11 +99,15 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, modelName string, origi
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		// Only send message_stop if we have actually output content
-		if (*param).(*Params).HasContent {
-			return [][]byte{translatorcommon.AppendSSEEventString(nil, "message_stop", `{"type":"message_stop"}`, 3)}
+		// A message that was opened must be closed, even when the turn produced no
+		// content blocks. Returning nothing here leaves the client with a stream
+		// that has no stop_reason and no message_stop.
+		if !(*param).(*Params).HasFirstResponse {
+			return [][]byte{}
 		}
-		return [][]byte{}
+		out := appendClaudeTerminalEvents(nil, (*param).(*Params), terminalStopReason((*param).(*Params), ""), gjson.Result{})
+		out = translatorcommon.AppendSSEEventString(out, "message_stop", `{"type":"message_stop"}`, 3)
+		return [][]byte{out}
 	}
 
 	output := make([]byte, 0, 1024)
@@ -179,6 +183,14 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, modelName string, origi
 				// thinking block that precedes it.
 				if hasThoughtSignature && partTextResult.String() == "" {
 					appendSignatureDelta(thoughtSignatureResult.String())
+					continue
+				}
+
+				// An empty text part carries nothing the client can render. Opening a
+				// block for it yields a message whose only content is an empty string,
+				// which the client reports as "no visible output" and answers with a
+				// retry nudge. Leave the turn genuinely empty instead.
+				if partTextResult.String() == "" {
 					continue
 				}
 
@@ -304,35 +316,53 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, modelName string, origi
 	// candidatesTokenCount would drop the terminal events and leave the stream
 	// without a stop_reason.
 	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) && !(*param).(*Params).HasFinalEvents {
-		// Only send final events if we have actually output content
-		if (*param).(*Params).HasContent {
-			// Close the final content block if one is still open
-			if (*param).(*Params).ResponseType != 0 {
-				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-				(*param).(*Params).ResponseType = 0
-			}
-
-			// Create the message delta template with appropriate stop reason
-			template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-			// Set tool_use stop reason if tools were used anywhere in this stream
-			if (*param).(*Params).SawToolCall {
-				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-			} else if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
-				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-			}
-
-			// Include thinking tokens in output token count if present
-			thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-			candidatesTokenCount := usageResult.Get("candidatesTokenCount").Int()
-			template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCount+thoughtsTokenCount)
-			template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
-
-			appendEvent("message_delta", string(template))
-			(*param).(*Params).HasFinalEvents = true
-		}
+		// The terminal events are emitted whether or not the turn produced content.
+		// A turn that yields nothing still needs a stop_reason: without one the
+		// client sees an unterminated stream, reports no visible output, and asks
+		// the model to answer again, which is what drives reasoning into the
+		// visible channel.
+		finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason").String()
+		output = appendClaudeTerminalEvents(output, (*param).(*Params), terminalStopReason((*param).(*Params), finish), usageResult)
 	}
 
 	return [][]byte{output}
+}
+
+// terminalStopReason maps the stream state and the upstream finish reason onto the
+// Anthropic stop_reason vocabulary.
+func terminalStopReason(p *Params, finishReason string) string {
+	switch {
+	case p.SawToolCall:
+		return "tool_use"
+	case finishReason == "MAX_TOKENS":
+		return "max_tokens"
+	default:
+		return "end_turn"
+	}
+}
+
+// appendClaudeTerminalEvents closes any open content block and emits the
+// message_delta carrying the stop reason. It is a no-op once the terminal events
+// have already been sent, so the [DONE] path can safely call it as a backstop for
+// streams whose last chunk carried no usage metadata.
+func appendClaudeTerminalEvents(output []byte, p *Params, stopReason string, usage gjson.Result) []byte {
+	if p == nil || p.HasFinalEvents {
+		return output
+	}
+	if p.ResponseType != 0 {
+		output = translatorcommon.AppendSSEEventString(output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex), 3)
+		p.ResponseType = 0
+	}
+	template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+	template, _ = sjson.SetBytes(template, "delta.stop_reason", stopReason)
+	if usage.Exists() {
+		// Thinking tokens count toward output even when no thought part was surfaced.
+		template, _ = sjson.SetBytes(template, "usage.output_tokens", usage.Get("candidatesTokenCount").Int()+usage.Get("thoughtsTokenCount").Int())
+		template, _ = sjson.SetBytes(template, "usage.input_tokens", usage.Get("promptTokenCount").Int())
+	}
+	output = translatorcommon.AppendSSEEventString(output, "message_delta", string(template), 3)
+	p.HasFinalEvents = true
+	return output
 }
 
 // ConvertGeminiCLIResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.

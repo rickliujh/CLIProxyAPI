@@ -212,7 +212,10 @@ func TestConvertGeminiCLIResponseToClaude_SignatureOnThinkingPartIsEmitted(t *te
 
 // A turn that produced no content at all must not emit terminal events, so an
 // empty response is not reported to the client as a completed message.
-func TestConvertGeminiCLIResponseToClaude_NoContentEmitsNoFinalEvents(t *testing.T) {
+// A turn that produces no content must still be terminated. Leaving the stream
+// open with no stop_reason makes the client report "no visible output" and ask the
+// model to answer again, which is what pushes reasoning into the visible channel.
+func TestConvertGeminiCLIResponseToClaude_NoContentStillTerminatesStream(t *testing.T) {
 	finishChunk := []byte(`{"response":{
 		"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],
 		"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10},
@@ -220,11 +223,33 @@ func TestConvertGeminiCLIResponseToClaude_NoContentEmitsNoFinalEvents(t *testing
 
 	out := convertStream(t, requestWithoutThinking, finishChunk, []byte("[DONE]"))
 
-	if strings.Contains(out, `"type":"message_delta"`) {
-		t.Fatalf("a turn with no content must not emit message_delta: %s", out)
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Fatalf("a turn with no content must still carry a stop_reason: %s", out)
 	}
-	if strings.Contains(out, `"type":"message_stop"`) {
-		t.Fatalf("a turn with no content must not emit message_stop: %s", out)
+	if !strings.Contains(out, `"type":"message_stop"`) {
+		t.Fatalf("a turn with no content must still emit message_stop: %s", out)
+	}
+	if strings.Count(out, `"type":"message_delta"`) != 1 {
+		t.Fatalf("message_delta must be emitted exactly once: %s", out)
+	}
+}
+
+// An empty text part carries nothing renderable, so it must not open a content
+// block. A message whose only content is an empty string reads to the client as a
+// blank answer.
+func TestConvertGeminiCLIResponseToClaude_EmptyTextPartOpensNoBlock(t *testing.T) {
+	chunk := []byte(`{"response":{
+		"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0},
+		"modelVersion":"gemini-test","responseId":"resp-test"}}`)
+
+	out := convertStream(t, requestWithoutThinking, chunk, []byte("[DONE]"))
+
+	if strings.Contains(out, `"type":"content_block_start"`) {
+		t.Fatalf("an empty text part must not open a content block: %s", out)
+	}
+	if !strings.Contains(out, `"type":"message_stop"`) {
+		t.Fatalf("the stream must still be terminated: %s", out)
 	}
 }
 
