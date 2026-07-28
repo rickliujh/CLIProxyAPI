@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -173,8 +171,8 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		if action == "countTokens" {
-			payload = deleteJSONField(payload, "project")
-			payload = deleteJSONField(payload, "model")
+			payload = helps.DeleteJSONField(payload, "project")
+			payload = helps.DeleteJSONField(payload, "model")
 		} else {
 			payload = setJSONField(payload, "project", projectID)
 			payload = setJSONField(payload, "model", attemptModel)
@@ -571,9 +569,9 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 			return cliproxyexecutor.Response{}, err
 		}
 
-		payload = deleteJSONField(payload, "project")
-		payload = deleteJSONField(payload, "model")
-		payload = deleteJSONField(payload, "request.safetySettings")
+		payload = helps.DeleteJSONField(payload, "project")
+		payload = helps.DeleteJSONField(payload, "model")
+		payload = helps.DeleteJSONField(payload, "request.safetySettings")
 		payload = fixGeminiCLIImageAspectRatio(baseModel, payload)
 		payload = cleanGeminiCLIRequestSchemas(payload)
 
@@ -1026,18 +1024,6 @@ func setJSONField(body []byte, key, value string) []byte {
 	return updated
 }
 
-// deleteJSONField removes a top-level key if present (best-effort) via sjson.
-func deleteJSONField(body []byte, key string) []byte {
-	if key == "" || len(body) == 0 {
-		return body
-	}
-	updated, err := sjson.DeleteBytes(body, key)
-	if err != nil {
-		return body
-	}
-	return updated
-}
-
 func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 	if len(body) == 0 {
 		return body
@@ -1142,69 +1128,9 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
-		if retryAfter, parseErr := parseRetryDelay(body); parseErr == nil && retryAfter != nil {
+		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
 	}
 	return err
-}
-
-// parseRetryDelay extracts the retry delay from a Google API 429 error response.
-// The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
-// Returns the parsed duration or an error if it cannot be determined.
-func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
-	// Try to parse the retryDelay from the error response
-	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
-	details := gjson.GetBytes(errorBody, "error.details")
-	if details.Exists() && details.IsArray() {
-		for _, detail := range details.Array() {
-			typeVal := detail.Get("@type").String()
-			if typeVal == "type.googleapis.com/google.rpc.RetryInfo" {
-				retryDelay := detail.Get("retryDelay").String()
-				if retryDelay != "" {
-					// Parse duration string like "0.847655010s"
-					duration, err := time.ParseDuration(retryDelay)
-					if err != nil {
-						return nil, fmt.Errorf("failed to parse duration")
-					}
-					return &duration, nil
-				}
-			}
-		}
-
-		// Fallback: try ErrorInfo.metadata.quotaResetDelay (e.g., "373.801628ms")
-		for _, detail := range details.Array() {
-			typeVal := detail.Get("@type").String()
-			if typeVal == "type.googleapis.com/google.rpc.ErrorInfo" {
-				quotaResetDelay := detail.Get("metadata.quotaResetDelay").String()
-				if quotaResetDelay != "" {
-					duration, err := time.ParseDuration(quotaResetDelay)
-					if err == nil {
-						return &duration, nil
-					}
-				}
-			}
-		}
-	}
-
-	// Fallback: parse from error.message "Your quota will reset after Xs."
-	message := gjson.GetBytes(errorBody, "error.message").String()
-	if message != "" {
-		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
-		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
-			seconds, err := strconv.Atoi(matches[1])
-			if err == nil {
-				duration := time.Duration(seconds) * time.Second
-				return &duration, nil
-			}
-		}
-		reHuman := regexp.MustCompile(`after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)\.?`)
-		if matches := reHuman.FindStringSubmatch(strings.ToLower(message)); len(matches) > 1 {
-			if duration, err := time.ParseDuration(matches[1]); err == nil && duration > 0 {
-				return &duration, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no RetryInfo found")
 }
