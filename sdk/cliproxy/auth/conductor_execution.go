@@ -413,6 +413,9 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatClaude
 	case "gemini", "vertex", "aistudio":
 		return sdktranslator.FormatGemini
+	case "gemini-cli":
+		// Gemini CLI shares the Code Assist wire format and translators with Antigravity.
+		return sdktranslator.FormatAntigravity
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return sdktranslator.FormatOpenAI
 	case "meta":

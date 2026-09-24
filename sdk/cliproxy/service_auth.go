@@ -15,10 +15,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// newDefaultAuthManager creates a default authentication manager with supported OAuth providers.
+// newDefaultAuthManager creates a default authentication manager with all supported providers.
 func newDefaultAuthManager() *sdkAuth.Manager {
 	return sdkAuth.NewManager(
 		sdkAuth.GetTokenStore(),
+		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewAntigravityAuthenticator(),
