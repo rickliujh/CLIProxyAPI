@@ -409,3 +409,96 @@ func assertNoTextAfterFunctionResponse(t *testing.T, payload []byte) {
 		}
 	}
 }
+
+// Claude Code's WebSearch tool sends a side request that offers only the typed web
+// search server tool. It must reach Code Assist as a Google Search grounding request,
+// in the form Gemini CLI's google_web_search uses, and the grounding must come back as
+// the server_tool_use and web_search_tool_result blocks Claude Code reads.
+func TestGeminiCLIExecuteStream_ClaudeWebSearchUsesGoogleSearch(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Go 1.27 was released in August 2026."}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["golang 1.27 release date"],"groundingChunks":[{"web":{"uri":"https://go.dev/doc/go1.27","title":"go.dev"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":36,"text":"Go 1.27 was released in August 2026."},"groundingChunkIndices":[0]}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":9,"totalTokenCount":19}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.8-flash","max_tokens":8000,"stream":true,
+		"system":[{"type":"text","text":"You are Claude Code."}],
+		"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: golang 1.27 release date"}]}]}`)
+	exec := NewGeminiCLIExecutor(&config.Config{})
+	result, errExecute := exec.ExecuteStream(context.Background(), newGeminiCLITestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		ResponseFormat:  sdktranslator.FormatClaude,
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	out, errStream := drainStream(t, result)
+	if errStream != nil {
+		t.Fatalf("stream error: %v", errStream)
+	}
+
+	body := gjson.ParseBytes(upstreamBody)
+	if got := body.Get("request.tools").Raw; got != `[{"googleSearch":{}}]` {
+		t.Errorf("request.tools = %s, want [{\"googleSearch\":{}}]: %s", got, upstreamBody)
+	}
+	if body.Get("requestType").Exists() {
+		t.Errorf("Antigravity requestType must not be sent: %s", upstreamBody)
+	}
+	if got := body.Get("request.contents.0.parts.0.text").String(); !strings.Contains(got, "golang 1.27 release date") {
+		t.Errorf("search query missing from contents: %s", upstreamBody)
+	}
+	if body.Get("request.systemInstruction.parts.0.text").String() == "" {
+		t.Errorf("search system instruction missing: %s", upstreamBody)
+	}
+
+	for _, want := range []string{`"type":"server_tool_use"`, `"type":"web_search_tool_result"`, "https://go.dev/doc/go1.27", "message_stop"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Claude stream missing %s: %s", want, out)
+		}
+	}
+}
+
+// A normal turn that merely offers web search next to other tools is not a search
+// request and keeps its function declarations.
+func TestGeminiCLIExecuteStream_WebSearchWithOtherToolsIsNotRewritten(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.8-flash","max_tokens":1024,"stream":true,
+		"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"Bash","description":"run","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	result, errExecute := NewGeminiCLIExecutor(&config.Config{}).ExecuteStream(context.Background(), newGeminiCLITestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		ResponseFormat:  sdktranslator.FormatClaude,
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	if _, errStream := drainStream(t, result); errStream != nil {
+		t.Fatalf("stream error: %v", errStream)
+	}
+	if got := gjson.GetBytes(upstreamBody, "request.tools.0.functionDeclarations.0.name").String(); got != "Bash" {
+		t.Errorf("function declarations must be kept: %s", upstreamBody)
+	}
+	if strings.Contains(string(upstreamBody), "googleSearch") {
+		t.Errorf("a normal turn must not be rewritten into a search request: %s", upstreamBody)
+	}
+}

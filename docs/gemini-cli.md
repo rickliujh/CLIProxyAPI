@@ -87,6 +87,34 @@ Lesson: when Code Assist returns a 400 that the code "cannot produce", ask for t
 debug shape lines before guessing. Code Assist error messages can name the wrong
 cause.
 
+## Claude Code WebSearch
+
+Claude Code's `WebSearch` tool does not search on the client. It sends a side request
+whose only tool is Anthropic's typed server tool (`web_search_20250305` or
+`web_search_20260209`), with the query as the user message, and reads the
+`server_tool_use` and `web_search_tool_result` blocks from the reply.
+
+The Antigravity Claude translator builds a dedicated search request only when an
+Antigravity credential serves the model (`registry.AntigravityWebSearchModelFor`).
+Otherwise it drops the typed tool, and with Gemini CLI accounts alone the model answered
+from memory with no search at all. The gemini-cli executor therefore detects that side
+request (`antigravityclaude.IsClaudeWebSearchRequest`) and replaces the translation with
+`antigravityclaude.BuildGoogleSearchRequest`. That is the same Google Search grounding
+call Gemini CLI's `google_web_search` makes (`tools: [{"googleSearch": {}}]`), without
+Antigravity's `requestType` and `enhancedContent` fields. Everything after that is
+existing Antigravity code:
+
+- the response translator turns `groundingMetadata` into Claude's search blocks
+  (`shouldTranslateWebSearchGrounding`: the original request had the typed tool and the
+  translated request has `googleSearch`),
+- the executor resolves `vertexaisearch.cloud.google.com/grounding-api-redirect/...`
+  links to their real URLs.
+
+Search requests skip the reasoning replay ledger, because they are one-off side requests
+and must not be recorded against the conversation's session. Claude's `max_uses` and
+`allowed_domains` are not forwarded. A turn that offers web search next to other tools
+is a normal turn and is not rewritten.
+
 ## Other things to keep
 
 - **Model list:** `internal/registry/models/models.json` → `gemini-cli` must keep

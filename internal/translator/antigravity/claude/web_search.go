@@ -97,6 +97,23 @@ func shouldBuildAntigravityWebSearchRequest(model string, payload []byte) bool {
 		allowsClaudeWebSearchToolChoice(payload)
 }
 
+// IsClaudeWebSearchRequest reports whether a Claude request only offers the typed web
+// search server tool, which is the request Claude Code's WebSearch tool sends.
+func IsClaudeWebSearchRequest(payload []byte) bool {
+	return hasOnlyClaudeTypedWebSearchTools(payload) && allowsClaudeWebSearchToolChoice(payload)
+}
+
+// BuildGoogleSearchRequest builds a Google Search grounding request for a Claude web
+// search request, in the plain Code Assist form Gemini CLI's google_web_search sends:
+// the query as the user turn and tools [{"googleSearch":{}}]. Unlike the Antigravity
+// form it carries no requestType and no enhancedContent options.
+func BuildGoogleSearchRequest(model string, payload []byte) []byte {
+	out := buildAntigravityWebSearchRequest(model, payload)
+	out, _ = sjson.DeleteBytes(out, "requestType")
+	out, _ = sjson.SetRawBytes(out, "request.tools", []byte(`[{"googleSearch":{}}]`))
+	return out
+}
+
 func buildAntigravityWebSearchRequest(model string, payload []byte) []byte {
 	query := extractClaudeWebSearchQuery(payload)
 	maxResultCount := extractClaudeWebSearchMaxUses(payload)

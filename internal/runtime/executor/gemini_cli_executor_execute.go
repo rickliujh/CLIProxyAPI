@@ -10,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -68,6 +69,16 @@ func (e *GeminiCLIExecutor) planRequest(ctx context.Context, auth *cliproxyauth.
 	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
 	translationReq := sdktranslator.RequestEnvelope{Format: plan.from, Model: baseModel, Stream: stream, ModelInfo: modelInfo}
 	originalTranslated, translated := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, plan.from, plan.to, translationReq, originalPayload, req.Payload)
+	// Claude Code's WebSearch tool sends a side request offering only the typed web
+	// search server tool. Without an Antigravity credential the translator drops that
+	// tool and the model answers from memory, so ground it on Google Search the way
+	// Gemini CLI's google_web_search does. The Antigravity response translator then
+	// emits the server_tool_use and web_search_tool_result blocks Claude Code reads.
+	webSearch := plan.from == sdktranslator.FormatClaude && antigravityclaude.IsClaudeWebSearchRequest(originalPayload)
+	if webSearch {
+		translated = antigravityclaude.BuildGoogleSearchRequest(baseModel, originalPayload)
+		originalTranslated = translated
+	}
 
 	translated, errThinking := helps.ApplyRequestThinking(translated, req, opts, plan.from.String(), geminiCLIAuthType, e.Identifier())
 	if errThinking != nil {
@@ -83,7 +94,9 @@ func (e *GeminiCLIExecutor) planRequest(ctx context.Context, auth *cliproxyauth.
 	plan.translated = translated
 
 	requestPayload := translated
-	if antigravityUsesReasoningReplayCache(baseModel) {
+	// A web search is a one-off side request, so it must not read or write the
+	// conversation's reasoning replay ledger.
+	if !webSearch && antigravityUsesReasoningReplayCache(baseModel) {
 		var errReplay error
 		requestPayload, plan.replayScope, errReplay = prepareAntigravityGeminiReasoningReplayPayload(ctx, baseModel, req, opts, requestPayload)
 		if errReplay != nil {
