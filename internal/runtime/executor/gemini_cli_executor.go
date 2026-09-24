@@ -347,6 +347,38 @@ func geminiCLIEnvelope(modelName string, payload []byte, projectID, sessionID st
 		payload, _ = sjson.SetRawBytes(payload, "request.toolConfig", []byte(toolConfig.Raw))
 		payload, _ = sjson.DeleteBytes(payload, "toolConfig")
 	}
+	return geminiCLIFunctionResponseRolesToUser(payload)
+}
+
+// geminiCLIFunctionResponseRolesToUser sends tool-result turns as user turns, as
+// gemini-cli does. The Antigravity pipeline rewrites them to model turns, which Code
+// Assist rejects for Gemini CLI once the request ends with one ("Requests ending with
+// a model turn are not supported"), and that is every request after a tool call.
+// Only the wire payload is changed; reasoning replay keeps the Antigravity form.
+func geminiCLIFunctionResponseRolesToUser(payload []byte) []byte {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if !contents.IsArray() {
+		return payload
+	}
+	for i, content := range contents.Array() {
+		if content.Get("role").String() == "user" {
+			continue
+		}
+		parts := content.Get("parts").Array()
+		if len(parts) == 0 {
+			continue
+		}
+		onlyResponses := true
+		for _, part := range parts {
+			if !part.Get("functionResponse").Exists() {
+				onlyResponses = false
+				break
+			}
+		}
+		if onlyResponses {
+			payload, _ = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", i), "user")
+		}
+	}
 	return payload
 }
 

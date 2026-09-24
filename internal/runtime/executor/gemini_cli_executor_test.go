@@ -249,3 +249,58 @@ func TestGeminiCLIExecute_MissingProjectFailsBeforeUpstream(t *testing.T) {
 		t.Fatal("upstream must not be called without a project")
 	}
 }
+
+// Claude Code ends every tool round trip with a tool_result. Antigravity sends tool
+// results as model-role turns, but Code Assist rejects a Gemini CLI request that ends
+// with a model turn ("Requests ending with a model turn are not supported"), so the
+// Gemini CLI request must carry them as user turns, as gemini-cli itself does.
+func TestGeminiCLIExecuteStream_ToolResultTurnIsSentAsUser(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":1,\"totalTokenCount\":4}}}\n\n"))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.5-flash","max_tokens":1024,"stream":true,
+		"tools":[{"name":"read_file","description":"read","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"read a.txt"}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a.txt"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"hello"}]}
+		]}`)
+	exec := NewGeminiCLIExecutor(&config.Config{})
+	result, errExecute := exec.ExecuteStream(context.Background(), newGeminiCLITestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.5-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		ResponseFormat:  sdktranslator.FormatClaude,
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	if _, errStream := drainStream(t, result); errStream != nil {
+		t.Fatalf("stream error: %v", errStream)
+	}
+
+	contents := gjson.GetBytes(upstreamBody, "request.contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("no contents sent: %s", upstreamBody)
+	}
+	last := contents[len(contents)-1]
+	if got := last.Get("role").String(); got != "user" {
+		t.Fatalf("last turn role = %q, want user: %s", got, upstreamBody)
+	}
+	if !last.Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("last turn should carry the tool result: %s", upstreamBody)
+	}
+	for _, content := range contents {
+		if content.Get("parts.0.functionResponse").Exists() && content.Get("role").String() != "user" {
+			t.Fatalf("tool result turn sent with role %q: %s", content.Get("role").String(), upstreamBody)
+		}
+	}
+}
