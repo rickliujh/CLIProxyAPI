@@ -347,13 +347,16 @@ func geminiCLIEnvelope(modelName string, payload []byte, projectID, sessionID st
 		payload, _ = sjson.SetRawBytes(payload, "request.toolConfig", []byte(toolConfig.Raw))
 		payload, _ = sjson.DeleteBytes(payload, "toolConfig")
 	}
-	return geminiCLIFunctionResponseRolesToUser(payload)
+	payload = geminiCLIFunctionResponseRolesToUser(payload)
+	// Code Assist rejects a Gemini CLI request whose last turn is a model turn.
+	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
 }
 
 // geminiCLIFunctionResponseRolesToUser sends tool-result turns as user turns, as
 // gemini-cli does. The Antigravity pipeline rewrites them to model turns, which Code
 // Assist rejects for Gemini CLI once the request ends with one ("Requests ending with
-// a model turn are not supported"), and that is every request after a tool call.
+// a model turn are not supported"), and that is every request after a tool call. A
+// functionResponse is never model-authored, so any turn carrying one is a user turn.
 // Only the wire payload is changed; reasoning replay keeps the Antigravity form.
 func geminiCLIFunctionResponseRolesToUser(payload []byte) []byte {
 	contents := gjson.GetBytes(payload, "request.contents")
@@ -364,31 +367,81 @@ func geminiCLIFunctionResponseRolesToUser(payload []byte) []byte {
 		if content.Get("role").String() == "user" {
 			continue
 		}
-		parts := content.Get("parts").Array()
-		if len(parts) == 0 {
-			continue
-		}
-		onlyResponses := true
-		for _, part := range parts {
-			if !part.Get("functionResponse").Exists() {
-				onlyResponses = false
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("functionResponse").Exists() {
+				payload, _ = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", i), "user")
 				break
 			}
-		}
-		if onlyResponses {
-			payload, _ = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", i), "user")
 		}
 	}
 	return payload
 }
 
+// geminiCLIClaudeMessagesShape summarizes an inbound Claude request as
+// role:block-types, without any message text, for diagnosing upstream rejections.
+func geminiCLIClaudeMessagesShape(payload []byte) string {
+	var shape []string
+	for _, message := range gjson.GetBytes(payload, "messages").Array() {
+		var kinds []string
+		content := message.Get("content")
+		if content.Type == gjson.String {
+			kinds = append(kinds, "text")
+		}
+		for _, block := range content.Array() {
+			kind := block.Get("type").String()
+			if kind == "thinking" && strings.TrimSpace(block.Get("signature").String()) == "" {
+				kind += "(nosig)"
+			}
+			kinds = append(kinds, kind)
+		}
+		shape = append(shape, message.Get("role").String()+":"+strings.Join(kinds, ","))
+	}
+	return "[" + strings.Join(shape, " | ") + "]"
+}
+
+// geminiCLIContentsShape summarizes the turn structure of a request as role:part-kinds,
+// without any message text, for diagnosing upstream rejections.
+func geminiCLIContentsShape(payload []byte) string {
+	var shape []string
+	for _, content := range gjson.GetBytes(payload, "request.contents").Array() {
+		var kinds []string
+		for _, part := range content.Get("parts").Array() {
+			kind := "other"
+			switch {
+			case part.Get("functionCall").Exists():
+				kind = "functionCall"
+			case part.Get("functionResponse").Exists():
+				kind = "functionResponse"
+			case part.Get("thought").Bool():
+				kind = "thought"
+			case part.Get("text").Exists():
+				kind = "text"
+				if part.Get("text").String() == "" {
+					kind = "emptyText"
+				}
+			case part.Get("inlineData").Exists():
+				kind = "inlineData"
+			}
+			if part.Get("thoughtSignature").Exists() {
+				kind += "+sig"
+			}
+			kinds = append(kinds, kind)
+		}
+		shape = append(shape, content.Get("role").String()+":"+strings.Join(kinds, ","))
+	}
+	return "[" + strings.Join(shape, " | ") + "]"
+}
+
 // buildRequest assembles one generate or stream request against Cloud Code Assist.
-func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, sessionID string) (*http.Request, error) {
+// It returns the final request body alongside the request for error diagnostics.
+func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, sessionID string) (*http.Request, []byte, error) {
 	projectID := resolveGeminiProjectID(auth)
 	if projectID == "" {
-		return nil, statusErr{code: http.StatusBadRequest, msg: "gemini-cli auth missing project_id; log in again with -login"}
+		return nil, nil, statusErr{code: http.StatusBadRequest, msg: "gemini-cli auth missing project_id; log in again with -login"}
 	}
+	log.Debugf("gemini-cli executor: pipeline contents shape: %s", geminiCLIContentsShape(payload))
 	payload = geminiCLIEnvelope(modelName, payload, projectID, sessionID)
+	log.Debugf("gemini-cli executor: sent contents shape: %s", geminiCLIContentsShape(payload))
 	if antigravityRequestNeedsSchemaSanitization(payload) {
 		useAntigravitySchema := strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
 		payload = []byte(sanitizeAntigravityRequestSchemas(string(payload), useAntigravitySchema))
@@ -411,7 +464,7 @@ func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
-		return nil, errReq
+		return nil, nil, errReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
@@ -427,7 +480,7 @@ func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	e.recordRequest(ctx, auth, httpReq, payload)
-	return httpReq, nil
+	return httpReq, payload, nil
 }
 
 func (e *GeminiCLIExecutor) recordRequest(ctx context.Context, auth *cliproxyauth.Auth, httpReq *http.Request, payload []byte) {

@@ -304,3 +304,43 @@ func TestGeminiCLIExecuteStream_ToolResultTurnIsSentAsUser(t *testing.T) {
 		}
 	}
 }
+
+// Whatever shape the Antigravity pipeline produces, the Gemini CLI wire request must
+// never end with a model turn, and a turn carrying a tool result is always a user turn.
+func TestGeminiCLIEnvelope_NeverEndsWithModelTurn(t *testing.T) {
+	cases := map[string]string{
+		"model text last":                 `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"hello"}]}]}}`,
+		"model tool result mixed w/ text": `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"id":"c1","name":"ls","args":{}}}]},{"role":"model","parts":[{"functionResponse":{"id":"c1","name":"ls","response":{"result":"a"}}},{"text":"note"}]}]}}`,
+		"model tool result only":          `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"id":"c1","name":"ls","args":{}}}]},{"role":"model","parts":[{"functionResponse":{"id":"c1","name":"ls","response":{"result":"a"}}}]}]}}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := geminiCLIEnvelope("gemini-3.8-flash", []byte(raw), "project-1", "session-1")
+			contents := gjson.GetBytes(out, "request.contents").Array()
+			if got := contents[len(contents)-1].Get("role").String(); got != "user" {
+				t.Fatalf("last role = %q, want user: %s", got, geminiCLIContentsShape(out))
+			}
+			for _, content := range contents {
+				hasResponse := false
+				for _, part := range content.Get("parts").Array() {
+					hasResponse = hasResponse || part.Get("functionResponse").Exists()
+				}
+				if hasResponse && content.Get("role").String() != "user" {
+					t.Fatalf("tool result turn has role %q: %s", content.Get("role").String(), geminiCLIContentsShape(out))
+				}
+			}
+		})
+	}
+}
+
+func TestGeminiCLIContentsShape_OmitsText(t *testing.T) {
+	raw := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"secret prompt"}]},{"role":"model","parts":[{"text":"x","thought":true},{"functionCall":{"name":"ls"},"thoughtSignature":"s"}]},{"role":"user","parts":[{"functionResponse":{"name":"ls"}},{"text":""}]}]}}`)
+	want := "[user:text | model:thought,functionCall+sig | user:functionResponse,emptyText]"
+	got := geminiCLIContentsShape(raw)
+	if got != want {
+		t.Fatalf("shape = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "secret") {
+		t.Fatal("shape must not leak message text")
+	}
+}

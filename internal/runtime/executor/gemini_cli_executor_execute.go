@@ -48,6 +48,9 @@ func (e *GeminiCLIExecutor) planRequest(ctx context.Context, auth *cliproxyauth.
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
 	}
+	if plan.from == sdktranslator.FormatClaude {
+		log.Debugf("gemini-cli executor: inbound claude messages shape: %s", geminiCLIClaudeMessagesShape(originalPayload))
+	}
 	originalPayload, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, plan.from, originalPayload)
 	if errValidate != nil {
 		return plan, errValidate
@@ -99,10 +102,13 @@ func (e *GeminiCLIExecutor) resolveWebSearchGroundingURLs(ctx context.Context, a
 	return helps.ResolveAntigravityGroundingURLs(ctx, e.cfg, auth, responseRawJSON)
 }
 
-// handleGeminiCLIErrorResponse reads a non-2xx response, drops reasoning replay state
-// that upstream rejected, and returns the status error.
-func (e *GeminiCLIExecutor) handleErrorResponse(ctx context.Context, plan geminiCLIRequestPlan, httpResp *http.Response) error {
+// handleErrorResponse reads a non-2xx response, drops reasoning replay state that
+// upstream rejected, and returns the status error.
+func (e *GeminiCLIExecutor) handleErrorResponse(ctx context.Context, plan geminiCLIRequestPlan, httpResp *http.Response, sentBody []byte) error {
 	bodyBytes, errStatus := readGeminiCLIErrorBody(ctx, e.cfg, httpResp)
+	if httpResp.StatusCode == http.StatusBadRequest {
+		log.Debugf("gemini-cli executor: rejected request contents shape: %s", geminiCLIContentsShape(sentBody))
+	}
 	if bodyBytes != nil {
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, plan.replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
 			// Report the upstream failure rather than the cleanup failure.
@@ -126,7 +132,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
-	httpReq, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.requestPayload, false, opts.Alt, plan.sessionID)
+	httpReq, sentBody, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.requestPayload, false, opts.Alt, plan.sessionID)
 	if err != nil {
 		return resp, err
 	}
@@ -138,7 +144,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		err = e.handleErrorResponse(ctx, plan, httpResp)
+		err = e.handleErrorResponse(ctx, plan, httpResp, sentBody)
 		return resp, err
 	}
 	bodyBytes, errRead := io.ReadAll(httpResp.Body)
@@ -181,7 +187,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, err
 	}
 	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
-	httpReq, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.requestPayload, true, opts.Alt, plan.sessionID)
+	httpReq, sentBody, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.requestPayload, true, opts.Alt, plan.sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +202,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		err = e.handleErrorResponse(ctx, plan, httpResp)
+		err = e.handleErrorResponse(ctx, plan, httpResp, sentBody)
 		return nil, err
 	}
 
