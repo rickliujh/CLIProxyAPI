@@ -105,6 +105,7 @@ func main() {
 	}
 
 	// Command-line flags to control the application's behavior.
+	var login bool
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
@@ -123,6 +124,7 @@ func main() {
 	var discoverServiceType string
 	var discoverInclude []string
 	var discoverExclude []string
+	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
 	var siwcBind string
@@ -136,6 +138,7 @@ func main() {
 	var localModel bool
 
 	// Define command-line flags for different operation modes.
+	flag.BoolVar(&login, "login", false, "Login Google Account")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
@@ -154,6 +157,7 @@ func main() {
 	flag.StringVar(&discoverServiceType, "discover-service-type", "", "DNS-SD service type for LAN discovery (default _ai-gateway._tcp)")
 	flag.Func("discover-include", "Comma-separated interface names to scan during LAN discovery", appendCSV(&discoverInclude))
 	flag.Func("discover-exclude", "Comma-separated interface names to skip during LAN discovery", appendCSV(&discoverExclude))
+	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -661,7 +665,7 @@ func main() {
 		ProxyURL:     loginProxyURL,
 	}
 
-	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || siwcBind != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -722,6 +726,9 @@ func main() {
 	} else if siwcBind != "" {
 		// Handle Sign in with ChatGPT (SIWC) credential binding
 		cmd.DoSIWCBind(cfg, siwcBind, options)
+	} else if login {
+		// Handle Google/Gemini login
+		cmd.DoLogin(cfg, projectID, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
@@ -966,7 +973,7 @@ func argvEnablesBoolFlag(args []string, name string) bool {
 
 func argvFlagConsumesValue(name string) bool {
 	switch name {
-	case "codex-login", "codex-device-login", "claude-login", "no-browser",
+	case "login", "codex-login", "codex-device-login", "claude-login", "no-browser",
 		"antigravity-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
 		"discover", "discover-json", "home-disable-cluster-discovery",
 		"tui", "standalone", "local-model":

@@ -95,7 +95,7 @@ func extractSummaryConfigFromGetter(get func(string) ojson.Result, normalized st
 		}); ok {
 			return config
 		}
-	case "antigravity":
+	case "gemini-cli", "antigravity":
 		if config, ok := firstSummaryBoolConfigFromGetter(get, []string{
 			"request.generationConfig.thinkingConfig.includeThoughts",
 			"request.generationConfig.thinkingConfig.include_thoughts",
@@ -212,7 +212,7 @@ func CanRepresentSummaryConfigForModelDoc(doc *ojson.Doc, format, model string, 
 	}
 	enabled := config.Mode == SummaryEnabled
 	switch normalized {
-	case "gemini", "antigravity", "interactions":
+	case "gemini", "gemini-cli", "antigravity", "interactions":
 		return true
 	case "openai-response", "codex":
 		return enabled
@@ -344,7 +344,7 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 				modified = true
 			}
 		}
-	case "antigravity":
+	case "gemini-cli", "antigravity":
 		if doc.Set("request.generationConfig.thinkingConfig.includeThoughts", enabled) == nil {
 			modified = true
 		}
@@ -401,7 +401,7 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 // intent that this package can read or write.
 func summaryFormatSupported(format string) bool {
 	switch format {
-	case "openai", "openai-response", "codex", "claude", "gemini", "antigravity", "interactions":
+	case "openai", "openai-response", "codex", "claude", "gemini", "gemini-cli", "antigravity", "interactions":
 		return true
 	default:
 		return false

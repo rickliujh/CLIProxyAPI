@@ -25,8 +25,8 @@ func PayloadConfigEvaluationCount() int64 {
 }
 
 // ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
-// paths as relative to the provided root path and restricts matches to the given
-// protocol when supplied. Defaults are checked
+// paths as relative to the provided root path (for example, "request" for Gemini CLI)
+// and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
 // requestPath is the inbound HTTP request path (when available) used for endpoint-scoped gates.
@@ -771,6 +771,8 @@ func normalizePayloadFromProtocol(protocol string) string {
 	switch protocol {
 	case "openai-response", "openai-responses", "response":
 		return "responses"
+	case "gemini-cli":
+		return "gemini"
 	default:
 		return protocol
 	}

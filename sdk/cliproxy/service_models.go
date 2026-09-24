@@ -58,6 +58,11 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		}
 	}
 	authKind := a.AuthKind()
+	if a.Attributes != nil {
+		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
+			return s.unregisterModelsForAuthFenced(a, fence)
+		}
+	}
 	// Unregister legacy client ID (if present) to avoid double counting
 	if a.Runtime != nil {
 		if idGetter, ok := a.Runtime.(interface{ GetClientID() string }); ok {
@@ -124,6 +129,9 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		} else {
 			models = appendVertexServiceAccountModels(cfg, a, models)
 		}
+		models = applyExcludedModels(models, excluded)
+	case "gemini-cli":
+		models = registry.GetGeminiCLIModels()
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()

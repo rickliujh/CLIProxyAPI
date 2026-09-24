@@ -332,6 +332,9 @@ func publishCatalogBytes(data []byte) ([]string, error) {
 	if len(parsed.Meta) == 0 && old != nil {
 		parsed.Meta = old.Meta
 	}
+	// Re-add embedded models the remote catalog omits before comparing, so the
+	// change detection sees the catalog that will actually be served.
+	mergeEmbeddedExtras(&parsed)
 	changed := detectChangedProviders(old, &parsed)
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = &parsed

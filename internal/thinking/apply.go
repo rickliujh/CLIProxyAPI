@@ -22,6 +22,7 @@ var providerAppliersMu sync.RWMutex
 // nativeProviderAppliers maps built-in provider names to their implementations.
 var nativeProviderAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
+	"gemini-cli":  nil,
 	"claude":      nil,
 	"openai":      nil,
 	"codex":       nil,
@@ -708,7 +709,7 @@ func extractThinkingConfigFromGetter(get func(string) ojson.Result, provider str
 	switch provider {
 	case "claude":
 		return extractClaudeConfigFromGetter(get)
-	case "gemini", "antigravity":
+	case "gemini", "gemini-cli", "antigravity":
 		return extractGeminiConfigFromGetter(get, provider)
 	case "interactions":
 		return extractInteractionsConfigFromGetter(get)
@@ -889,7 +890,7 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 
 func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider string) ThinkingConfig {
 	prefix := "generationConfig.thinkingConfig"
-	if provider == "antigravity" {
+	if provider == "gemini-cli" || provider == "antigravity" {
 		prefix = "request.generationConfig.thinkingConfig"
 	}
 
