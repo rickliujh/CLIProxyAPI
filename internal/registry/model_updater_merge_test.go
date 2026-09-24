@@ -102,3 +102,18 @@ func TestMergeEmbeddedExtrasHandlesNilInputs(t *testing.T) {
 	withEmbeddedCatalog(t, &staticModelsJSON{GeminiCLI: []*ModelInfo{{ID: "gemini-3.5-flash"}}})
 	mergeEmbeddedExtras(nil) // must not panic
 }
+
+// Gemini CLI serves gemini-3.8-flash on Code Assist (LATEST_GEMINI_FLASH_MODEL in
+// google-gemini/gemini-cli), so the embedded gemini-cli catalog must list it.
+func TestEmbeddedGeminiCLICatalogIncludesLatestFlash(t *testing.T) {
+	for _, model := range GetGeminiCLIModels() {
+		if model.ID != "gemini-3.8-flash" {
+			continue
+		}
+		if model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+			t.Fatalf("gemini-3.8-flash must declare thinking levels: %+v", model.Thinking)
+		}
+		return
+	}
+	t.Fatalf("gemini-cli models %v do not include gemini-3.8-flash", modelIDs(GetGeminiCLIModels()))
+}
