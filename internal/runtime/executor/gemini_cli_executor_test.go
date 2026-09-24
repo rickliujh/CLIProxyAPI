@@ -320,6 +320,7 @@ func TestGeminiCLIEnvelope_NeverEndsWithModelTurn(t *testing.T) {
 			if got := contents[len(contents)-1].Get("role").String(); got != "user" {
 				t.Fatalf("last role = %q, want user: %s", got, geminiCLIContentsShape(out))
 			}
+			assertNoTextAfterFunctionResponse(t, out)
 			for _, content := range contents {
 				hasResponse := false
 				for _, part := range content.Get("parts").Array() {
@@ -342,5 +343,69 @@ func TestGeminiCLIContentsShape_OmitsText(t *testing.T) {
 	}
 	if strings.Contains(got, "secret") {
 		t.Fatal("shape must not leak message text")
+	}
+}
+
+// Field report shape: Claude Code follows a tool_result with a mid-conversation system
+// message, which reaches Code Assist as text after the functionResponse in the same
+// user turn. Code Assist rejects that order with "Requests ending with a model turn are
+// not supported", so text must precede the tool result, as gemini-cli would send it.
+func TestGeminiCLIExecuteStream_TextAfterToolResultIsMovedFirst(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":1,\"totalTokenCount\":4}}}\n\n"))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.8-flash","max_tokens":1024,"stream":true,
+		"tools":[{"name":"LS","description":"list","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"audit this repo"}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"LS","input":{"path":"."}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.go"}]},
+			{"role":"system","content":[{"type":"text","text":"todo list is empty"}]}
+		]}`)
+	exec := NewGeminiCLIExecutor(&config.Config{})
+	result, errExecute := exec.ExecuteStream(context.Background(), newGeminiCLITestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		ResponseFormat:  sdktranslator.FormatClaude,
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	if _, errStream := drainStream(t, result); errStream != nil {
+		t.Fatalf("stream error: %v", errStream)
+	}
+
+	shape := geminiCLIContentsShape(upstreamBody)
+	contents := gjson.GetBytes(upstreamBody, "request.contents").Array()
+	last := contents[len(contents)-1]
+	if got := last.Get("role").String(); got != "user" {
+		t.Fatalf("last role = %q, want user: %s", got, shape)
+	}
+	assertNoTextAfterFunctionResponse(t, upstreamBody)
+	if !strings.HasSuffix(shape, "user:text,functionResponse]") {
+		t.Fatalf("last turn should be [text, functionResponse]: %s", shape)
+	}
+}
+
+func assertNoTextAfterFunctionResponse(t *testing.T, payload []byte) {
+	t.Helper()
+	for _, content := range gjson.GetBytes(payload, "request.contents").Array() {
+		seenResponse := false
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("functionResponse").Exists() {
+				seenResponse = true
+			} else if seenResponse && part.Get("text").Exists() {
+				t.Fatalf("text follows a functionResponse in one turn: %s", geminiCLIContentsShape(payload))
+			}
+		}
 	}
 }

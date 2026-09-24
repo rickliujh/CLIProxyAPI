@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -352,26 +353,35 @@ func geminiCLIEnvelope(modelName string, payload []byte, projectID, sessionID st
 	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
 }
 
-// geminiCLIFunctionResponseRolesToUser sends tool-result turns as user turns, as
-// gemini-cli does. The Antigravity pipeline rewrites them to model turns, which Code
-// Assist rejects for Gemini CLI once the request ends with one ("Requests ending with
-// a model turn are not supported"), and that is every request after a tool call. A
-// functionResponse is never model-authored, so any turn carrying one is a user turn.
-// Only the wire payload is changed; reasoning replay keeps the Antigravity form.
+// geminiCLIFunctionResponseRolesToUser shapes tool-result turns the way Code Assist
+// accepts them for Gemini CLI. The Antigravity pipeline sends them as model turns with
+// the tool results first and any other parts (such as Claude Code's system reminders)
+// after them. Code Assist rejects both with a misleading 400 "Requests ending with a
+// model turn are not supported" (see #5607). A functionResponse is never
+// model-authored, so the turn becomes a user turn, and its text parts are moved ahead
+// of the tool results as the Gemini translator does. Only the wire payload is changed;
+// reasoning replay keeps the Antigravity form.
 func geminiCLIFunctionResponseRolesToUser(payload []byte) []byte {
 	contents := gjson.GetBytes(payload, "request.contents")
 	if !contents.IsArray() {
 		return payload
 	}
 	for i, content := range contents.Array() {
-		if content.Get("role").String() == "user" {
+		if !translatorcommon.ContentHasGeminiFunctionResponse([]byte(content.Raw)) {
 			continue
 		}
-		for _, part := range content.Get("parts").Array() {
-			if part.Get("functionResponse").Exists() {
-				payload, _ = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", i), "user")
-				break
-			}
+		path := fmt.Sprintf("request.contents.%d", i)
+		if content.Get("role").String() != "user" {
+			payload, _ = sjson.SetBytes(payload, path+".role", "user")
+		}
+		parts := content.Get("parts").Array()
+		rawParts := make([][]byte, 0, len(parts))
+		for _, part := range parts {
+			rawParts = append(rawParts, []byte(part.Raw))
+		}
+		original := translatorcommon.JoinRawArray(rawParts)
+		if reordered := translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)); !bytes.Equal(reordered, original) {
+			payload, _ = sjson.SetRawBytes(payload, path+".parts", reordered)
 		}
 	}
 	return payload
