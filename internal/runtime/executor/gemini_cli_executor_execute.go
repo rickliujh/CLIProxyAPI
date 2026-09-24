@@ -48,7 +48,7 @@ func (e *GeminiCLIExecutor) planRequest(ctx context.Context, auth *cliproxyauth.
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
 	}
-	if plan.from == sdktranslator.FormatClaude {
+	if plan.from == sdktranslator.FormatClaude && log.IsLevelEnabled(log.DebugLevel) {
 		log.Debugf("gemini-cli executor: inbound claude messages shape: %s", geminiCLIClaudeMessagesShape(originalPayload))
 	}
 	originalPayload, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, plan.from, originalPayload)
@@ -106,7 +106,7 @@ func (e *GeminiCLIExecutor) resolveWebSearchGroundingURLs(ctx context.Context, a
 // upstream rejected, and returns the status error.
 func (e *GeminiCLIExecutor) handleErrorResponse(ctx context.Context, plan geminiCLIRequestPlan, httpResp *http.Response, sentBody []byte) error {
 	bodyBytes, errStatus := readGeminiCLIErrorBody(ctx, e.cfg, httpResp)
-	if httpResp.StatusCode == http.StatusBadRequest {
+	if httpResp.StatusCode == http.StatusBadRequest && log.IsLevelEnabled(log.DebugLevel) {
 		log.Debugf("gemini-cli executor: rejected request contents shape: %s", geminiCLIContentsShape(sentBody))
 	}
 	if bodyBytes != nil {

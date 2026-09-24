@@ -449,9 +449,14 @@ func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth
 	if projectID == "" {
 		return nil, nil, statusErr{code: http.StatusBadRequest, msg: "gemini-cli auth missing project_id; log in again with -login"}
 	}
-	log.Debugf("gemini-cli executor: pipeline contents shape: %s", geminiCLIContentsShape(payload))
+	debug := log.IsLevelEnabled(log.DebugLevel)
+	if debug {
+		log.Debugf("gemini-cli executor: pipeline contents shape: %s", geminiCLIContentsShape(payload))
+	}
 	payload = geminiCLIEnvelope(modelName, payload, projectID, sessionID)
-	log.Debugf("gemini-cli executor: sent contents shape: %s", geminiCLIContentsShape(payload))
+	if debug {
+		log.Debugf("gemini-cli executor: sent contents shape: %s", geminiCLIContentsShape(payload))
+	}
 	if antigravityRequestNeedsSchemaSanitization(payload) {
 		useAntigravitySchema := strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
 		payload = []byte(sanitizeAntigravityRequestSchemas(string(payload), useAntigravitySchema))
