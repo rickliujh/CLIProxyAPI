@@ -80,6 +80,21 @@ func replaceBody(resp *http.Response, body []byte, contentType string) {
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }
 
+// syntheticResponse answers a request without calling Bedrock.
+func syntheticResponse(req *http.Request, status int, body []byte) *http.Response {
+	return &http.Response{
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		StatusCode:    status,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": {"application/json"}},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       req,
+	}
+}
+
 func closeResponseBody(resp *http.Response) {
 	if errClose := resp.Body.Close(); errClose != nil {
 		log.Debugf("bedrock: close response body: %v", errClose)

@@ -798,7 +798,12 @@ type ClaudeKey struct {
 
 func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
 
-func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+func (k ClaudeKey) GetBaseURL() string {
+	if k.Bedrock != nil && strings.TrimSpace(k.BaseURL) == "" {
+		return k.Bedrock.BaseURL()
+	}
+	return k.BaseURL
+}
 
 func (k ClaudeKey) GetPrefix() string { return k.Prefix }
 

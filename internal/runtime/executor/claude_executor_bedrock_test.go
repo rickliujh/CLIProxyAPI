@@ -84,7 +84,7 @@ func TestClaudeExecutorSendsBedrockCredentialsToBedrock(t *testing.T) {
 
 	settings := bedrock.Settings{Profile: "claude-executor-bedrock-test", Endpoint: server.URL}
 	attrs := settings.Attributes()
-	attrs["base_url"] = settings.BaseURL()
+	attrs["base_url"] = server.URL
 	auth := &cliproxyauth.Auth{ID: "bedrock-auth", Provider: "claude", Attributes: attrs}
 	executor := NewClaudeExecutor(&config.Config{})
 

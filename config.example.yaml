@@ -889,17 +889,20 @@ upstream:
 #
 #     # Amazon Bedrock (Claude models) with an AWS CLI profile instead of an API key.
 #     # The group has no base-url; each key's bedrock block names the profile and region.
-#     # models map Bedrock model IDs to client names. Use "eu." inference profiles with an
-#     # EU region to keep inference inside the EU. See docs/bedrock.md.
+#     # Without models, the Claude inference profiles of the region's geography (eu-* -> eu.anthropic.*)
+#     # are discovered and served under their Anthropic names, e.g. claude-sonnet-4-5-20250929.
+#     # Discovery needs bedrock:ListInferenceProfiles. See docs/bedrock.md.
 #     - name: bedrock-eu
-#       models:
-#         - name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0" # Bedrock inference profile ID
-#           alias: "claude-sonnet-4-5"                           # client-visible model name
+#       # models:                                                  # optional: list models instead of discovering them
+#       #   - name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0" # Bedrock inference profile ID
+#       #     alias: "claude-sonnet-4-5"                           # client-visible model name
 #       keys:
 #         - bedrock:
 #             profile: "my-sso-profile" # AWS CLI profile (SSO, assume-role, credential_process, static keys)
 #             region: "eu-central-1"    # optional: defaults to the profile's region
-#             # endpoint: "https://vpce-123.bedrock-runtime.eu-central-1.vpce.amazonaws.com" # optional override
+#             # geo: "eu"               # optional: inference profile geography to discover; defaults from the region
+#             # endpoint: "https://vpce-123.bedrock-runtime.eu-central-1.vpce.amazonaws.com" # optional runtime endpoint override
+#             # control-endpoint: "https://vpce-456.bedrock.eu-central-1.vpce.amazonaws.com" # optional discovery endpoint override
 #             # betas: []                # optional: anthropic-beta values to forward; omit for the built-in list
 #
 #   # xAI API keys

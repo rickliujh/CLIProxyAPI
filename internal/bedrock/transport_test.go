@@ -299,9 +299,6 @@ func TestSettingsRoundTripThroughAttributes(t *testing.T) {
 	if !ok || out.Profile != "work" || out.Region != "eu-west-1" || !out.BetasSet || len(out.Betas) != 0 {
 		t.Fatalf("settings = %+v ok=%v", out, ok)
 	}
-	if in.BaseURL() != "https://bedrock-runtime.eu-west-1.amazonaws.com" {
-		t.Fatalf("base URL = %s", in.BaseURL())
-	}
 	if _, ok := SettingsFromAttributes(map[string]string{"api_key": "x"}); ok {
 		t.Fatal("a plain API key must not be treated as Bedrock")
 	}

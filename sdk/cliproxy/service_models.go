@@ -150,6 +150,8 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		if entry := resolveConfigClaudeKeyForConfig(cfg, a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildClaudeConfigModels(entry)
+			} else if entry.Bedrock != nil {
+				models = s.bedrockDiscoveredModels(cfg, a)
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels

@@ -204,7 +204,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		base := strings.TrimSpace(ck.BaseURL)
 		bedrockSettings, isBedrock := claudeBedrockSettings(&ck)
 		if isBedrock {
-			key, base = "", bedrockSettings.BaseURL()
+			key, base = "", ck.Bedrock.BaseURL()
 		}
 		if key == "" && base == "" {
 			continue

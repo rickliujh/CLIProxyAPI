@@ -14,9 +14,6 @@ A Bedrock credential is a Claude API-key entry with a `bedrock` block and no
 api-keys:
   claude:
     - name: bedrock-eu
-      models:
-        - name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
-          alias: "claude-sonnet-4-5"
       keys:
         - bedrock:
             profile: "my-sso-profile"
@@ -27,12 +24,37 @@ api-keys:
 |------------|---------|
 | `profile`  | AWS CLI profile in `~/.aws/config`. SSO, assume-role, `credential_process` and static keys all work. Empty uses the default credential chain (`AWS_PROFILE`, environment variables, `default`). |
 | `region`   | Bedrock Runtime region. Empty uses the profile's region. |
-| `endpoint` | Optional endpoint override, e.g. a VPC interface endpoint. |
+| `geo`      | Inference profile geography to discover (`eu`, `us`, `apac`, `global`, ...). Empty derives it from the region: `eu-*` gives `eu`, `us-*` gives `us`, `ap-*` gives `apac`. |
+| `endpoint` | Optional Bedrock Runtime endpoint override, e.g. a VPC interface endpoint. |
+| `control-endpoint` | Optional Bedrock control-plane endpoint override for discovery. |
 | `betas`    | `anthropic-beta` values forwarded to Bedrock. Omit for the built-in list; `[]` forwards none. |
 
-`models` is required in practice: it maps the Bedrock model ID (`name`) to the name
-clients send (`alias`). Without it the entry advertises Anthropic model names, which
-Bedrock does not accept, and a warning is logged.
+## Models
+
+Without `models`, the entry discovers its models. It calls `ListInferenceProfiles`
+(IAM permission `bedrock:ListInferenceProfiles`) and keeps the active Claude
+profiles of its geography, so an EU entry sees only `eu.anthropic.*` profiles.
+Each one is served under its Anthropic name, with the geography prefix and the
+version suffix removed: `eu.anthropic.claude-sonnet-4-5-20250929-v1:0` becomes
+`claude-sonnet-4-5-20250929`. These names get the same catalog metadata (thinking
+support, context size) as the Anthropic API models of that name, and clients use
+them unchanged.
+
+Discovery runs in the background when the entry is registered, and the models
+appear once it finishes. The result is cached for 6 hours; a request for a model
+name the cache does not know triggers another discovery, at most every 5 minutes,
+so newly released profiles are picked up. A model the account has no profile for
+gets a `404 not_found_error`. If discovery fails, a warning is logged and the
+entry serves no models until the next successful discovery.
+
+To choose the models yourself, list them instead. Each `name` is a Bedrock model
+or inference profile ID and `alias` the name clients send:
+
+```yaml
+      models:
+        - name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+          alias: "claude-sonnet-4-5"
+```
 
 For SSO profiles, run `aws sso login --profile <name>` before starting the proxy and
 whenever the SSO session expires. Credentials are refreshed automatically while the
@@ -40,10 +62,10 @@ session is valid.
 
 ## Keeping inference in the EU
 
-Use the `eu.` cross-region inference profiles (for example
-`eu.anthropic.claude-sonnet-4-5-20250929-v1:0`) and an EU `region`. An EU inference
-profile only routes requests to EU regions, and it can only be called from an EU
-source region. List the Claude profiles available to your account:
+Use an EU `region`. Discovery then only serves `eu.anthropic.*` cross-region
+inference profiles; with `models`, list `eu.` profile IDs. An EU inference profile
+only routes requests to EU regions, and it can only be called from an EU source
+region. To see the Claude profiles available to your account:
 
 ```bash
 aws bedrock list-inference-profiles --region eu-central-1 --profile my-sso-profile \
@@ -66,7 +88,9 @@ credential its HTTP client gets the transport in `internal/bedrock`, which:
   exception into an SSE `error` event, and Bedrock error bodies into Anthropic
   error bodies with the same status code;
 - sends `/v1/messages/count_tokens` to `CountTokens` with the foundation model ID
-  (the `eu.` prefix removed).
+  (the `eu.` prefix removed);
+- maps a plain Anthropic model name to its discovered inference profile, and
+  answers `GET /v1/models` with the discovered models.
 
 Bedrock rejects requests that carry an `anthropic-beta` value it does not support,
 so other values are dropped (logged at debug level). Bedrock also does not offer

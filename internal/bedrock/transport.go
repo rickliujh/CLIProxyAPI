@@ -31,6 +31,7 @@ type operation int
 const (
 	opMessages operation = iota
 	opCountTokens
+	opListModels
 )
 
 // inferenceProfilePrefix matches the geography prefix of a cross-region inference
@@ -51,10 +52,14 @@ func newTransport(settings Settings, base http.RoundTripper, creds credentialSou
 
 // RoundTrip implements http.RoundTripper.
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	op, ok := operationForPath(req.URL.Path)
+	op, ok := operationForRequest(req.Method, req.URL.Path)
 	if !ok {
 		closeRequestBody(req)
-		return nil, fmt.Errorf("bedrock: unsupported Anthropic endpoint %s", req.URL.Path)
+		return nil, fmt.Errorf("bedrock: unsupported Anthropic endpoint %s %s", req.Method, req.URL.Path)
+	}
+	if op == opListModels {
+		closeRequestBody(req)
+		return t.listModels(req)
 	}
 	body, errRead := readRequestBody(req)
 	if errRead != nil {
@@ -69,6 +74,17 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	creds, region, errCreds := t.creds(req.Context())
 	if errCreds != nil {
 		return nil, errCreds
+	}
+	if needsModelMapping(model) {
+		profileID, found, errResolve := t.resolveModel(req.Context(), creds, region, model)
+		if errResolve != nil {
+			return nil, errResolve
+		}
+		if !found {
+			message := fmt.Sprintf("model %s has no %s inference profile on Amazon Bedrock in this account", model, t.geo(region))
+			return syntheticResponse(req, http.StatusNotFound, anthropicErrorJSON("not_found_error", message)), nil
+		}
+		model = profileID
 	}
 
 	payload, errPayload := t.invokeBody(body, req.Header)
@@ -117,15 +133,31 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-func operationForPath(path string) (operation, bool) {
-	switch strings.TrimRight(path, "/") {
-	case "/v1/messages":
+func operationForRequest(method, path string) (operation, bool) {
+	switch path = strings.TrimRight(path, "/"); {
+	case method == http.MethodPost && path == "/v1/messages":
 		return opMessages, true
-	case "/v1/messages/count_tokens":
+	case method == http.MethodPost && path == "/v1/messages/count_tokens":
 		return opCountTokens, true
+	case method == http.MethodGet && path == "/v1/models":
+		return opListModels, true
 	default:
 		return 0, false
 	}
+}
+
+// listModels answers GET /v1/models with the discovered Claude inference
+// profiles, under their client-facing Anthropic names.
+func (t *transport) listModels(req *http.Request) (*http.Response, error) {
+	creds, region, errCreds := t.creds(req.Context())
+	if errCreds != nil {
+		return nil, errCreds
+	}
+	models, errDiscover := t.discover(req.Context(), creds, region, rediscoverAfter)
+	if errDiscover != nil {
+		return nil, errDiscover
+	}
+	return syntheticResponse(req, http.StatusOK, modelListResponse(models)), nil
 }
 
 func readRequestBody(req *http.Request) ([]byte, error) {

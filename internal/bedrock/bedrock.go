@@ -17,12 +17,10 @@ const (
 	AttrProfile  = "bedrock_profile"
 	AttrRegion   = "bedrock_region"
 	AttrEndpoint = "bedrock_endpoint"
+	AttrControl  = "bedrock_control_endpoint"
+	AttrGeo      = "bedrock_geo"
 	AttrBetas    = "bedrock_betas"
 )
-
-// DefaultBaseURL is the placeholder base URL for an entry whose region is only
-// known once its AWS profile is loaded. The transport always replaces the host.
-const DefaultBaseURL = "https://bedrock-runtime.amazonaws.com"
 
 // DefaultBetas are the anthropic-beta values Bedrock accepts for Claude models.
 // Bedrock rejects a request that carries any beta it does not know, so every
@@ -44,23 +42,16 @@ var DefaultBetas = []string{
 
 // Settings is the Bedrock configuration of one credential.
 type Settings struct {
-	Profile  string
-	Region   string
-	Endpoint string
+	Profile         string
+	Region          string
+	Endpoint        string
+	ControlEndpoint string
+	// Geo is the inference profile geography to discover; empty derives it
+	// from the region.
+	Geo string
 	// Betas replaces DefaultBetas when BetasSet is true.
 	Betas    []string
 	BetasSet bool
-}
-
-// BaseURL returns the base URL recorded on the credential for these settings.
-func (s Settings) BaseURL() string {
-	if s.Endpoint != "" {
-		return s.Endpoint
-	}
-	if s.Region != "" {
-		return "https://bedrock-runtime." + s.Region + ".amazonaws.com"
-	}
-	return DefaultBaseURL
 }
 
 // Attributes encodes the settings as auth attributes.
@@ -75,6 +66,12 @@ func (s Settings) Attributes() map[string]string {
 	if s.Endpoint != "" {
 		attrs[AttrEndpoint] = s.Endpoint
 	}
+	if s.ControlEndpoint != "" {
+		attrs[AttrControl] = s.ControlEndpoint
+	}
+	if s.Geo != "" {
+		attrs[AttrGeo] = s.Geo
+	}
 	if s.BetasSet {
 		attrs[AttrBetas] = strings.Join(s.Betas, ",")
 	}
@@ -88,9 +85,11 @@ func SettingsFromAttributes(attrs map[string]string) (settings Settings, ok bool
 		return Settings{}, false
 	}
 	settings = Settings{
-		Profile:  strings.TrimSpace(attrs[AttrProfile]),
-		Region:   strings.TrimSpace(attrs[AttrRegion]),
-		Endpoint: strings.TrimSpace(attrs[AttrEndpoint]),
+		Profile:         strings.TrimSpace(attrs[AttrProfile]),
+		Region:          strings.TrimSpace(attrs[AttrRegion]),
+		Endpoint:        strings.TrimSpace(attrs[AttrEndpoint]),
+		ControlEndpoint: strings.TrimSpace(attrs[AttrControl]),
+		Geo:             strings.TrimSpace(attrs[AttrGeo]),
 	}
 	if raw, exists := attrs[AttrBetas]; exists {
 		settings.BetasSet = true
