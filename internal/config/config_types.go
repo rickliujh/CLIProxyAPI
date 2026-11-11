@@ -772,6 +772,10 @@ type ClaudeKey struct {
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 
+	// Bedrock routes this entry to Amazon Bedrock with AWS CLI profile credentials
+	// instead of an API key.
+	Bedrock *BedrockConfig `yaml:"bedrock,omitempty" json:"bedrock,omitempty"`
+
 	// FingerprintProfile selects the Claude Code request fingerprint for this
 	// credential on Anthropic Messages. Empty/default keeps the caller request
 	// fingerprint and headers, including first-party api.anthropic.com API keys.

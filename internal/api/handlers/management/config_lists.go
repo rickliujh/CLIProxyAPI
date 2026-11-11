@@ -2192,6 +2192,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	entry.Cloak = config.NormalizeCloakConfig(entry.Cloak)
+	entry.Bedrock = config.NormalizeBedrockConfig(entry.Bedrock)
 	if len(entry.Models) == 0 {
 		return
 	}

@@ -887,6 +887,21 @@ upstream:
 #                                           # for real Claude OAuth on any upstream, and for claude-code-cli profiles
 #                                           # only on api.anthropic.com; Vertex keeps provider-native signing
 #
+#     # Amazon Bedrock (Claude models) with an AWS CLI profile instead of an API key.
+#     # The group has no base-url; each key's bedrock block names the profile and region.
+#     # models map Bedrock model IDs to client names. Use "eu." inference profiles with an
+#     # EU region to keep inference inside the EU. See docs/bedrock.md.
+#     - name: bedrock-eu
+#       models:
+#         - name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0" # Bedrock inference profile ID
+#           alias: "claude-sonnet-4-5"                           # client-visible model name
+#       keys:
+#         - bedrock:
+#             profile: "my-sso-profile" # AWS CLI profile (SSO, assume-role, credential_process, static keys)
+#             region: "eu-central-1"    # optional: defaults to the profile's region
+#             # endpoint: "https://vpce-123.bedrock-runtime.eu-central-1.vpce.amazonaws.com" # optional override
+#             # betas: []                # optional: anthropic-beta values to forward; omit for the built-in list
+#
 #   # xAI API keys
 #   # Uses the native xAI executor, including its Responses namespace-tool handling.
 #

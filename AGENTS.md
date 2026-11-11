@@ -33,6 +33,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/store/` — Storage implementations and secret resolution
 - `internal/managementasset/` — Config snapshots and management assets
 - `internal/cache/` — Request signature caching
+- `internal/bedrock/` — Amazon Bedrock transport for Claude API-key entries with a `bedrock` block: rewrites, SigV4-signs and converts the Claude executor's HTTP exchange (see `docs/bedrock.md`)
 - `internal/watcher/` — Config hot-reload and watchers
 - `internal/wsrelay/` — WebSocket relay sessions
 - `internal/usage/` — Usage and token accounting

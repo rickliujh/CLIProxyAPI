@@ -202,12 +202,19 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		ck := cfg.ClaudeKey[i]
 		key := strings.TrimSpace(ck.APIKey)
 		base := strings.TrimSpace(ck.BaseURL)
+		bedrockSettings, isBedrock := claudeBedrockSettings(&ck)
+		if isBedrock {
+			key, base = "", bedrockSettings.BaseURL()
+		}
 		if key == "" && base == "" {
 			continue
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		idParts := []string{key, base, proxyURL, prefix, config.FormatSortedHeaders(ck.Headers)}
+		if isBedrock {
+			idParts = append(idParts, "bedrock", bedrockSettings.Profile)
+		}
 		if poolID := config.FormatConnectionPoolDedupID(ck.ConnectionPool); poolID != "" {
 			idParts = append(idParts, poolID)
 		}
@@ -232,6 +239,13 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if base != "" {
 			attrs["base_url"] = base
 		}
+		label := "claude-apikey"
+		if isBedrock {
+			label = "claude-bedrock"
+			for name, value := range bedrockSettings.Attributes() {
+				attrs[name] = value
+			}
+		}
 		if ck.RebuildMidSystemMessage {
 			attrs["rebuild_mid_system_message"] = "true"
 		}
@@ -248,7 +262,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
-			Label:      "claude-apikey",
+			Label:      label,
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
