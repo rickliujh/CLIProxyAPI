@@ -14,7 +14,11 @@ with the same `{model, project, request{contents, ...}}` envelope and the same
 its own Gemini CLI translators. `GeminiCLIExecutor` translates to the `antigravity`
 format and reuses Antigravity's signature validation, sanitizing, reasoning replay
 cache, boundary-turn handling and response translators. It only differs in client
-identity, and it fixes up the wire payload in `geminiCLIEnvelope` just before sending.
+identity, and it fixes up the wire payload in `geminiCLIEnvelopeDoc` just before sending.
+Like the Antigravity executor, it carries the request as one `ojson.Doc` from
+translation to the wire and applies the user's payload rules last, after the
+envelope and every fix-up, so nothing overwrites a configured value or restores a
+filtered field.
 
 | | gemini-cli | antigravity |
 |---|---|---|
@@ -52,11 +56,12 @@ executor and has a regression test in `gemini_cli_executor_test.go`.
    translator by `ReorderGeminiUserParts` (`4fde97f4`). Antigravity orders tool
    results first, which its own backend accepts.
 4. **The request must end with a user turn.** After rules 2 and 3,
-   `geminiCLIEnvelope` also runs `EnsureGeminiTrailingUserContent`, so this holds
+   `geminiCLIEnvelopeDoc` also runs `EnsureGeminiTrailingUserContentDoc`, so this holds
    whatever the pipeline produced.
 
-Rules 2 to 4 are applied to the wire payload only. `plan.requestPayload`, which
-the reasoning replay accumulator records, keeps the Antigravity form, so replay
+Rules 2 to 4 are applied to the wire payload only. `plan.replayPayload`, which
+the reasoning replay accumulator records, is snapshotted before the envelope and
+keeps the Antigravity form, so replay
 context fingerprints still match on the next turn. Do not move these fix-ups
 earlier in the pipeline.
 
@@ -147,7 +152,7 @@ is a normal turn and is not rewritten.
 ## Where to look
 
 - `internal/runtime/executor/gemini_cli_executor.go`: identity, token refresh, project,
-  `geminiCLIEnvelope` and the wire fix-ups, shape helpers.
+  `buildRequest`, `geminiCLIEnvelopeDoc` and the wire fix-ups, shape helpers.
 - `internal/runtime/executor/gemini_cli_executor_execute.go`: the `planRequest`
   pipeline, Execute, ExecuteStream, CountTokens.
 - `internal/runtime/executor/antigravity_*.go`: the shared pipeline pieces being reused.

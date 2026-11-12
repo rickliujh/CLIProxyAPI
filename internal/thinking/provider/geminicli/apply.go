@@ -15,7 +15,7 @@ import (
 // Applier applies thinking configuration for Gemini CLI API format.
 type Applier struct{}
 
-var _ thinking.ProviderApplier = (*Applier)(nil)
+var _ thinking.ProviderDocApplier = (*Applier)(nil)
 
 // NewApplier creates a new Gemini CLI thinking applier.
 func NewApplier() *Applier {
@@ -26,57 +26,54 @@ func init() {
 	thinking.RegisterProvider("gemini-cli", NewApplier())
 }
 
-// Apply applies thinking configuration to Gemini CLI request body.
-func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
-	if thinking.IsUserDefinedModel(modelInfo) {
-		return a.applyCompatible(body, config)
-	}
-	if modelInfo.Thinking == nil {
-		return body, nil
-	}
+// thinkingConfigPath is where Gemini CLI carries the thinking configuration.
+const thinkingConfigPath = "request.generationConfig.thinkingConfig."
 
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return body, nil
-	}
-
-	if len(body) == 0 || !ojson.ValidBytes(body) {
-		body = []byte(`{}`)
-	}
-
-	// ModeAuto: Always use Budget format with thinkingBudget=-1
-	if config.Mode == thinking.ModeAuto {
-		return a.applyBudgetFormat(body, config)
-	}
-	if config.Mode == thinking.ModeBudget {
-		return a.applyBudgetFormat(body, config)
-	}
-
-	// For non-auto modes, choose format based on model capabilities
-	support := modelInfo.Thinking
-	if len(support.Levels) > 0 {
-		return a.applyLevelFormat(body, config)
-	}
-	return a.applyBudgetFormat(body, config)
+func supportedMode(mode thinking.ThinkingMode) bool {
+	return mode == thinking.ModeBudget || mode == thinking.ModeLevel || mode == thinking.ModeNone || mode == thinking.ModeAuto
 }
 
-func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+// Apply applies thinking configuration to Gemini CLI request body.
+func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+	if !thinking.IsUserDefinedModel(modelInfo) && modelInfo.Thinking == nil {
 		return body, nil
 	}
-
+	if !supportedMode(config.Mode) {
+		return body, nil
+	}
 	if len(body) == 0 || !ojson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
-
-	if config.Mode == thinking.ModeAuto {
-		return a.applyBudgetFormat(body, config)
+	doc := ojson.NewDoc(body)
+	if errApply := a.ApplyDoc(doc, config, modelInfo); errApply != nil {
+		return body, errApply
 	}
+	return doc.Bytes(), nil
+}
 
-	if config.Mode == thinking.ModeLevel || (config.Mode == thinking.ModeNone && config.Level != "") {
-		return a.applyLevelFormat(body, config)
+// ApplyDoc applies thinking configuration onto doc in place.
+func (a *Applier) ApplyDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) error {
+	if doc == nil || !supportedMode(config.Mode) {
+		return nil
 	}
-
-	return a.applyBudgetFormat(body, config)
+	if thinking.IsUserDefinedModel(modelInfo) {
+		if config.Mode == thinking.ModeLevel || (config.Mode == thinking.ModeNone && config.Level != "") {
+			return a.applyLevelFormatDoc(doc, config)
+		}
+		return a.applyBudgetFormatDoc(doc, config)
+	}
+	if modelInfo.Thinking == nil {
+		return nil
+	}
+	// ModeAuto and ModeBudget always use the budget format (auto is thinkingBudget=-1).
+	if config.Mode == thinking.ModeAuto || config.Mode == thinking.ModeBudget {
+		return a.applyBudgetFormatDoc(doc, config)
+	}
+	// For other modes, choose the format from the model's capabilities.
+	if len(modelInfo.Thinking.Levels) > 0 {
+		return a.applyLevelFormatDoc(doc, config)
+	}
+	return a.applyBudgetFormatDoc(doc, config)
 }
 
 // wireThinkingLevel renders a canonical thinking level in the casing the Cloud
@@ -89,84 +86,69 @@ func wireThinkingLevel(level thinking.ThinkingLevel) string {
 	return strings.ToUpper(strings.TrimSpace(string(level)))
 }
 
-func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := ojson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget")
-	result, _ = ojson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
-	result, _ = ojson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
-	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
-	result, _ = ojson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
-
-	if config.Mode == thinking.ModeNone {
-		result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
-		if config.Level != "" {
-			result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", wireThinkingLevel(config.Level))
-		}
-		return result, nil
+// explicitIncludeThoughts returns the caller's includeThoughts setting, in
+// either camelCase or snake_case. It must be read before the snake_case field
+// is removed.
+func explicitIncludeThoughts(doc *ojson.Doc) (value bool, set bool) {
+	if inc := doc.Get(thinkingConfigPath + "includeThoughts"); inc.Exists() {
+		return inc.Bool(), true
 	}
-
-	// Only handle ModeLevel - budget conversion should be done by upper layer
-	if config.Mode != thinking.ModeLevel {
-		return body, nil
+	if inc := doc.Get(thinkingConfigPath + "include_thoughts"); inc.Exists() {
+		return inc.Bool(), true
 	}
-
-	level := wireThinkingLevel(config.Level)
-	result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", level)
-
-	// Respect user's explicit includeThoughts setting from original body; default to true if not set
-	// Support both camelCase and snake_case variants
-	includeThoughts := true
-	if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-	} else if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-	}
-	result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-	return result, nil
+	return false, false
 }
 
-func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := ojson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingLevel")
-	result, _ = ojson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
-	result, _ = ojson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
-	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
-	result, _ = ojson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
+// deleteFields removes conflicting fields so the output carries exactly one of
+// thinkingLevel and thinkingBudget, and normalizes includeThoughts to camelCase
+// to avoid oneof conflicts in upstream JSON parsing.
+func deleteFields(doc *ojson.Doc, fields ...string) {
+	for _, field := range fields {
+		_ = doc.Delete(thinkingConfigPath + field)
+	}
+}
+
+func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
+	// Only ModeNone and ModeLevel apply here; budget conversion is done by the upper layer.
+	if config.Mode != thinking.ModeNone && config.Mode != thinking.ModeLevel {
+		return nil
+	}
+	includeThoughts, userSet := explicitIncludeThoughts(doc)
+	deleteFields(doc, "thinkingBudget", "thinking_budget", "thinking_level", "include_thoughts")
+
+	if config.Mode == thinking.ModeNone {
+		_ = doc.Set(thinkingConfigPath+"includeThoughts", false)
+		if config.Level != "" {
+			_ = doc.Set(thinkingConfigPath+"thinkingLevel", wireThinkingLevel(config.Level))
+		}
+		return nil
+	}
+
+	_ = doc.Set(thinkingConfigPath+"thinkingLevel", wireThinkingLevel(config.Level))
+	// Respect the caller's explicit includeThoughts; default to true.
+	if !userSet {
+		includeThoughts = true
+	}
+	_ = doc.Set(thinkingConfigPath+"includeThoughts", includeThoughts)
+	return nil
+}
+
+func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
+	includeThoughts, userSet := explicitIncludeThoughts(doc)
+	deleteFields(doc, "thinkingLevel", "thinking_level", "thinking_budget", "include_thoughts")
 
 	budget := config.Budget
+	_ = doc.Set(thinkingConfigPath+"thinkingBudget", budget)
 
-	// For ModeNone, always set includeThoughts to false regardless of user setting.
-	// This ensures that when user requests budget=0 (disable thinking output),
-	// the includeThoughts is correctly set to false even if budget is clamped to min.
+	// ModeNone always disables thought output, even when the budget is clamped
+	// to the model minimum.
 	if config.Mode == thinking.ModeNone {
-		result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-		result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
-		return result, nil
+		_ = doc.Set(thinkingConfigPath+"includeThoughts", false)
+		return nil
 	}
-
-	// Determine includeThoughts: respect user's explicit setting from original body if provided
-	// Support both camelCase and snake_case variants
-	var includeThoughts bool
-	var userSetIncludeThoughts bool
-	if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-		userSetIncludeThoughts = true
-	} else if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-		userSetIncludeThoughts = true
+	if !userSet {
+		includeThoughts = config.Mode == thinking.ModeAuto || budget > 0
 	}
-
-	if !userSetIncludeThoughts {
-		// No explicit setting, use default logic based on mode
-		switch config.Mode {
-		case thinking.ModeAuto:
-			includeThoughts = true
-		default:
-			includeThoughts = budget > 0
-		}
-	}
-
-	result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-	result, _ = ojson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-	return result, nil
+	_ = doc.Set(thinkingConfigPath+"includeThoughts", includeThoughts)
+	return nil
 }

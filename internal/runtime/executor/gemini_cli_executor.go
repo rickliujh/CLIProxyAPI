@@ -329,27 +329,28 @@ func applyGeminiCLIHeaders(r *http.Request, model string) {
 	r.Header.Set("X-Goog-Api-Client", misc.GeminiCLIApiClientHeader)
 }
 
-// geminiCLIEnvelope turns a translated Antigravity-format payload into the request body
-// gemini-cli sends: {model, project, user_prompt_id, request{..., session_id}}. The
+// geminiCLIEnvelopeDoc turns a translated Antigravity-format payload into the request
+// body gemini-cli sends: {model, project, user_prompt_id, request{..., session_id}}. The
 // Antigravity-only envelope fields are removed so the request carries one identity.
-func geminiCLIEnvelope(modelName string, payload []byte, projectID, sessionID string) []byte {
+func geminiCLIEnvelopeDoc(doc *ojson.Doc, modelName, projectID, sessionID string) {
 	for _, field := range []string{"userAgent", "requestType", "requestId", "enabledCreditTypes", "request.sessionId"} {
-		payload, _ = ojson.DeleteBytes(payload, field)
+		_ = doc.Delete(field)
 	}
-	payload = helps.SetStringIfDifferent(payload, "model", modelName)
-	payload = helps.SetStringIfDifferent(payload, "project", projectID)
-	payload, _ = ojson.SetBytes(payload, "user_prompt_id", uuid.NewString())
+	helps.SetStringIfDifferentDoc(doc, "model", modelName)
+	helps.SetStringIfDifferentDoc(doc, "project", projectID)
+	_ = doc.Set("user_prompt_id", uuid.NewString())
 	if sessionID = strings.TrimPrefix(strings.TrimSpace(sessionID), "-"); sessionID == "" {
-		sessionID = strings.TrimPrefix(generateStableSessionID(payload), "-")
+		sessionID = strings.TrimPrefix(generateStableSessionIDDoc(doc), "-")
 	}
-	payload, _ = ojson.SetBytes(payload, "request.session_id", sessionID)
-	if toolConfig := ojson.GetBytes(payload, "toolConfig"); toolConfig.Exists() && !ojson.GetBytes(payload, "request.toolConfig").Exists() {
-		payload, _ = ojson.SetRawBytes(payload, "request.toolConfig", []byte(toolConfig.Raw))
-		payload, _ = ojson.DeleteBytes(payload, "toolConfig")
+	_ = doc.Set("request.session_id", sessionID)
+	if toolConfig := doc.Get("toolConfig"); toolConfig.Exists() && !doc.Get("request.toolConfig").Exists() {
+		raw := strings.Clone(toolConfig.Raw)
+		_ = doc.SetRaw("request.toolConfig", raw)
+		_ = doc.Delete("toolConfig")
 	}
-	payload = geminiCLIFunctionResponseRolesToUser(payload)
+	geminiCLIFunctionResponseRolesToUserDoc(doc)
 	// Code Assist rejects a Gemini CLI request whose last turn is a model turn.
-	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
+	helps.EnsureGeminiTrailingUserContentDoc(doc, "request.contents")
 }
 
 // geminiCLIFunctionResponseRolesToUser shapes tool-result turns the way Code Assist
@@ -360,19 +361,24 @@ func geminiCLIEnvelope(modelName string, payload []byte, projectID, sessionID st
 // model-authored, so the turn becomes a user turn, and its text parts are moved ahead
 // of the tool results as the Gemini translator does. Only the wire payload is changed;
 // reasoning replay keeps the Antigravity form.
-func geminiCLIFunctionResponseRolesToUser(payload []byte) []byte {
-	contents := ojson.GetBytes(payload, "request.contents")
+func geminiCLIFunctionResponseRolesToUserDoc(doc *ojson.Doc) {
+	contents := doc.Get("request.contents")
 	if !contents.IsArray() {
-		return payload
+		return
 	}
+	// Collect every edit before applying any, so no edit changes the document
+	// while its contents are still being read.
+	type turnEdit struct {
+		path     string
+		setRole  bool
+		newParts []byte
+	}
+	var edits []turnEdit
 	for i, content := range contents.Array() {
 		if !translatorcommon.ContentHasGeminiFunctionResponse([]byte(content.Raw)) {
 			continue
 		}
-		path := fmt.Sprintf("request.contents.%d", i)
-		if content.Get("role").String() != "user" {
-			payload, _ = ojson.SetBytes(payload, path+".role", "user")
-		}
+		edit := turnEdit{path: fmt.Sprintf("request.contents.%d", i), setRole: content.Get("role").String() != "user"}
 		parts := content.Get("parts").Array()
 		rawParts := make([][]byte, 0, len(parts))
 		for _, part := range parts {
@@ -380,10 +386,18 @@ func geminiCLIFunctionResponseRolesToUser(payload []byte) []byte {
 		}
 		original := translatorcommon.JoinRawArray(rawParts)
 		if reordered := translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)); !bytes.Equal(reordered, original) {
-			payload, _ = ojson.SetRawBytes(payload, path+".parts", reordered)
+			edit.newParts = reordered
+		}
+		edits = append(edits, edit)
+	}
+	for _, edit := range edits {
+		if edit.setRole {
+			_ = doc.Set(edit.path+".role", "user")
+		}
+		if edit.newParts != nil {
+			_ = doc.SetRawBytes(edit.path+".parts", edit.newParts)
 		}
 	}
-	return payload
 }
 
 // geminiCLIClaudeMessagesShape summarizes an inbound Claude request as
@@ -411,8 +425,12 @@ func geminiCLIClaudeMessagesShape(payload []byte) string {
 // geminiCLIContentsShape summarizes the turn structure of a request as role:part-kinds,
 // without any message text, for diagnosing upstream rejections.
 func geminiCLIContentsShape(payload []byte) string {
+	return geminiCLIContentsShapeOf(ojson.GetBytes(payload, "request.contents"))
+}
+
+func geminiCLIContentsShapeOf(contents ojson.Result) string {
 	var shape []string
-	for _, content := range ojson.GetBytes(payload, "request.contents").Array() {
+	for _, content := range contents.Array() {
 		var kinds []string
 		for _, part := range content.Get("parts").Array() {
 			kind := "other"
@@ -443,22 +461,29 @@ func geminiCLIContentsShape(payload []byte) string {
 
 // buildRequest assembles one generate or stream request against Cloud Code Assist.
 // It returns the final request body alongside the request for error diagnostics.
-func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, sessionID string) (*http.Request, []byte, error) {
+// The user's payload rules run last, on the final Gemini CLI body, and the body is
+// serialized once.
+func (e *GeminiCLIExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, sessionID string) (*http.Request, []byte, error) {
 	projectID := resolveGeminiProjectID(auth)
 	if projectID == "" {
 		return nil, nil, statusErr{code: http.StatusBadRequest, msg: "gemini-cli auth missing project_id; log in again with -login"}
 	}
+	if doc == nil {
+		doc = ojson.NewDoc(nil)
+	}
 	debug := log.IsLevelEnabled(log.DebugLevel)
 	if debug {
-		log.Debugf("gemini-cli executor: pipeline contents shape: %s", geminiCLIContentsShape(payload))
+		log.Debugf("gemini-cli executor: pipeline contents shape: %s", geminiCLIContentsShapeOf(doc.Get("request.contents")))
 	}
-	payload = geminiCLIEnvelope(modelName, payload, projectID, sessionID)
+	geminiCLIEnvelopeDoc(doc, modelName, projectID, sessionID)
+	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
+		useAntigravitySchema := strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, false)
+	}
+	helps.FinalizePayloadDoc(ctx, doc)
+	payload := doc.Bytes()
 	if debug {
 		log.Debugf("gemini-cli executor: sent contents shape: %s", geminiCLIContentsShape(payload))
-	}
-	if antigravityRequestNeedsSchemaSanitization(payload) {
-		useAntigravitySchema := strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
-		payload = []byte(sanitizeAntigravityRequestSchemas(string(payload), useAntigravitySchema))
 	}
 
 	path := geminiCLIGeneratePath

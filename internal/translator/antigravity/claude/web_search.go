@@ -107,10 +107,10 @@ func IsClaudeWebSearchRequest(payload []byte) bool {
 // the query as the user turn and tools [{"googleSearch":{}}]. Unlike the Antigravity
 // form it carries no requestType and no enhancedContent options.
 func BuildGoogleSearchRequest(model string, payload []byte) []byte {
-	out := buildAntigravityWebSearchRequest(model, payload)
-	out, _ = ojson.DeleteBytes(out, "requestType")
-	out, _ = ojson.SetRawBytes(out, "request.tools", []byte(`[{"googleSearch":{}}]`))
-	return out
+	doc := ojson.NewDoc(buildAntigravityWebSearchRequest(model, payload))
+	_ = doc.Delete("requestType")
+	_ = doc.SetRaw("request.tools", `[{"googleSearch":{}}]`)
+	return doc.Bytes()
 }
 
 func buildAntigravityWebSearchRequest(model string, payload []byte) []byte {

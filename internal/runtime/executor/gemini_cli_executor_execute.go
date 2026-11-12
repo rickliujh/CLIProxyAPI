@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -26,16 +27,32 @@ type geminiCLIRequestPlan struct {
 	to              sdktranslator.Format
 	responseFormat  sdktranslator.Format
 	originalPayload []byte
-	translated      []byte
-	requestPayload  []byte
-	replayScope     antigravityReasoningReplayScope
-	sessionID       string
+	// translated is the request body as sent, for response translation; it is
+	// set once the request is built.
+	translated []byte
+	// doc is the Antigravity-format request body, before the Gemini CLI envelope.
+	doc *ojson.Doc
+	// finalize applies the user's payload rules as the last step before the
+	// body is serialized.
+	finalize      helps.PayloadFinalizer
+	replayScope   antigravityReasoningReplayScope
+	replayPayload []byte
+	sessionID     string
 }
 
-// planRequest runs the Antigravity request pipeline: signature validation, translation,
-// thinking, payload rules, signature sanitizing and reasoning replay. Thinking is applied
-// with the gemini-cli applier, which renders thinkingLevel as the upper-case proto enum
-// name that the Gemini CLI identity requires.
+// replayRequestPayload is the request body reasoning replay records a response against.
+func (p geminiCLIRequestPlan) replayRequestPayload(sentBody []byte) []byte {
+	if len(p.replayPayload) > 0 {
+		return p.replayPayload
+	}
+	return sentBody
+}
+
+// planRequest runs the Antigravity request pipeline on one ojson.Doc: signature
+// validation, translation, thinking, signature sanitizing and reasoning replay.
+// Thinking is applied with the gemini-cli applier, which renders thinkingLevel as
+// the upper-case proto enum name that the Gemini CLI identity requires. The
+// user's payload rules are applied later, by buildRequest, as the final step.
 func (e *GeminiCLIExecutor) planRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, reporter *helps.UsageReporter) (geminiCLIRequestPlan, error) {
 	plan := geminiCLIRequestPlan{
 		from:           opts.SourceFormat,
@@ -82,30 +99,27 @@ func (e *GeminiCLIExecutor) planRequest(ctx context.Context, auth *cliproxyauth.
 		originalTranslated = translated
 	}
 
-	translated, errThinking := helps.ApplyRequestThinking(translated, req, opts, plan.from.String(), geminiCLIAuthType, e.Identifier())
-	if errThinking != nil {
+	doc := ojson.NewDoc(translated)
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, plan.from.String(), geminiCLIAuthType, e.Identifier()); errThinking != nil {
 		return plan, errThinking
 	}
+	plan.finalize = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "gemini", "request", originalTranslated, req, opts)
+	sanitizeAntigravityGeminiRequestSignaturesDoc(baseModel, doc)
+	_ = doc.Delete("request.stream")
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "gemini", plan.from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
-	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
-	translated, _ = ojson.DeleteBytes(translated, "request.stream")
-	reporter.SetTranslatedReasoningEffort(translated, plan.to.String())
-	plan.translated = translated
-
-	requestPayload := translated
 	// A web search is a one-off side request, so it must not read or write the
 	// conversation's reasoning replay ledger.
 	if !webSearch && antigravityUsesReasoningReplayCache(baseModel) {
 		var errReplay error
-		requestPayload, plan.replayScope, errReplay = prepareAntigravityGeminiReasoningReplayPayload(ctx, baseModel, req, opts, requestPayload)
-		if errReplay != nil {
+		if plan.replayScope, _, errReplay = prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
 			return plan, errReplay
 		}
 	}
-	plan.requestPayload = ensureAntigravityGeminiBoundaryUserContent(baseModel, requestPayload)
+	ensureAntigravityGeminiBoundaryUserContentDoc(baseModel, doc)
+	if plan.replayScope.valid() {
+		plan.replayPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
+	}
+	plan.doc = doc
 	plan.sessionID = helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata)
 	return plan, nil
 }
@@ -147,10 +161,13 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
-	httpReq, sentBody, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.requestPayload, false, opts.Alt, plan.sessionID)
+	ctx = helps.WithPayloadFinalizer(ctx, plan.finalize)
+	httpReq, sentBody, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.doc, false, opts.Alt, plan.sessionID)
 	if err != nil {
 		return resp, err
 	}
+	plan.translated = sentBody
+	reporter.SetTranslatedRequestMetadata(sentBody, plan.to.String())
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -173,7 +190,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
-	cacheAntigravityReasoningReplayFromResponse(ctx, plan.replayScope, plan.requestPayload, bodyBytes)
+	cacheAntigravityReasoningReplayFromResponse(ctx, plan.replayScope, plan.replayRequestPayload(sentBody), bodyBytes)
 	bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, plan, bodyBytes)
 	reporter.ObserveResponseModel(bodyBytes)
 	reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
@@ -202,10 +219,13 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, err
 	}
 	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
-	httpReq, sentBody, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.requestPayload, true, opts.Alt, plan.sessionID)
+	ctx = helps.WithPayloadFinalizer(ctx, plan.finalize)
+	httpReq, sentBody, err := e.buildRequest(ctx, auth, plan.token, baseModel, plan.doc, true, opts.Alt, plan.sessionID)
 	if err != nil {
 		return nil, err
 	}
+	plan.translated = sentBody
+	reporter.SetTranslatedRequestMetadata(sentBody, plan.to.String())
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -221,7 +241,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, err
 	}
 
-	replayAccumulator := newAntigravityReasoningReplayAccumulator(plan.replayScope, plan.requestPayload)
+	replayAccumulator := newAntigravityReasoningReplayAccumulator(plan.replayScope, plan.replayRequestPayload(sentBody))
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(resp *http.Response) {
 		defer close(out)
@@ -309,13 +329,17 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
 	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
 	translated := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq).Body
-	translated = ensureAntigravityGeminiLeadingUserContent(baseModel, translated)
+	translatedDoc := ojson.NewDoc(translated)
+	ensureAntigravityGeminiLeadingUserContentDoc(baseModel, translatedDoc)
 
-	payload := []byte(`{"request":{"model":"","contents":[]}}`)
-	payload, _ = ojson.SetBytes(payload, "request.model", "models/"+baseModel)
-	if contents := ojson.GetBytes(translated, "request.contents"); contents.IsArray() {
-		payload, _ = ojson.SetRawBytes(payload, "request.contents", []byte(contents.Raw))
+	// Gemini CLI counts tokens with only the model and contents, so the user's
+	// payload rules, written for generate requests, do not apply here.
+	countDoc := ojson.NewDocString(`{"request":{"model":"","contents":[]}}`)
+	_ = countDoc.Set("request.model", "models/"+baseModel)
+	if contents := translatedDoc.Get("request.contents"); contents.IsArray() {
+		_ = countDoc.SetRaw("request.contents", strings.Clone(contents.Raw))
 	}
+	payload := countDoc.Bytes()
 
 	requestURL := resolveGeminiCLIBaseURL(auth) + geminiCLICountTokensPath
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(payload))

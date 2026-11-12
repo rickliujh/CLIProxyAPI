@@ -315,7 +315,9 @@ func TestGeminiCLIEnvelope_NeverEndsWithModelTurn(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			out := geminiCLIEnvelope("gemini-3.8-flash", []byte(raw), "project-1", "session-1")
+			doc := ojson.NewDocString(raw)
+			geminiCLIEnvelopeDoc(doc, "gemini-3.8-flash", "project-1", "session-1")
+			out := doc.Bytes()
 			contents := ojson.GetBytes(out, "request.contents").Array()
 			if got := contents[len(contents)-1].Get("role").String(); got != "user" {
 				t.Fatalf("last role = %q, want user: %s", got, geminiCLIContentsShape(out))
@@ -500,5 +502,47 @@ func TestGeminiCLIExecuteStream_WebSearchWithOtherToolsIsNotRewritten(t *testing
 	}
 	if strings.Contains(string(upstreamBody), "googleSearch") {
 		t.Errorf("a normal turn must not be rewritten into a search request: %s", upstreamBody)
+	}
+}
+
+// The user's payload rules are the final step before a Gemini CLI request is sent:
+// nothing the executor adds afterwards, such as the Gemini CLI envelope's
+// session_id, may restore a filtered field or overwrite a configured value.
+func TestGeminiCLIPayloadRulesAreAppliedLast(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	models := []config.PayloadModelRule{{Name: "gemini-*"}}
+	cfg.Payload.Filter = []config.PayloadFilterRule{{Models: models, Params: []string{"session_id"}}}
+	cfg.Payload.Override = []config.PayloadRule{{Models: models, Params: map[string]any{"generationConfig.temperature": 0.25}}}
+
+	payload := []byte(`{"model":"gemini-3.5-flash","max_tokens":64,"stream":true,"temperature":0.9,"messages":[{"role":"user","content":"hi"}]}`)
+	result, errExecute := NewGeminiCLIExecutor(cfg).ExecuteStream(context.Background(), newGeminiCLITestAuth(server.URL), cliproxyexecutor.Request{
+		Model: "gemini-3.5-flash", Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude, Stream: true, OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	if _, errStream := drainStream(t, result); errStream != nil {
+		t.Fatalf("stream error: %v", errStream)
+	}
+
+	body := ojson.ParseBytes(upstreamBody)
+	if body.Get("request.session_id").Exists() {
+		t.Errorf("a filtered request.session_id was restored after the payload rules: %s", upstreamBody)
+	}
+	if got := body.Get("request.generationConfig.temperature").Float(); got != 0.25 {
+		t.Errorf("temperature = %v, want the configured 0.25: %s", got, upstreamBody)
+	}
+	if body.Get("user_prompt_id").String() == "" || body.Get("project").String() != "project-1" {
+		t.Errorf("the Gemini CLI envelope is incomplete: %s", upstreamBody)
 	}
 }
