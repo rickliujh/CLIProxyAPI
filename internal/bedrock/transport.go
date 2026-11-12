@@ -158,7 +158,7 @@ func (t *transport) listModels(req *http.Request) (*http.Response, error) {
 	if errCreds != nil {
 		return nil, errCreds
 	}
-	models, errDiscover := t.discover(req.Context(), creds, region, rediscoverAfter)
+	models, errDiscover := t.discover(req.Context(), creds, region, minRediscover())
 	if errDiscover != nil {
 		return nil, errDiscover
 	}

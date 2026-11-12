@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -18,13 +19,39 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Discovery timing, stored atomically because background discovery loops read
+// it while tests shorten it.
+var (
+	// refreshInterval is how long discovered profiles count as fresh; the
+	// service refreshes the list in the background once it is this old.
+	refreshInterval atomic.Int64
+	// minRediscoverInterval limits how often a model listing or an unknown model
+	// name triggers another discovery.
+	minRediscoverInterval atomic.Int64
+)
+
+func init() {
+	refreshInterval.Store(int64(6 * time.Hour))
+	minRediscoverInterval.Store(int64(5 * time.Minute))
+}
+
+// RefreshInterval is how long discovered profiles count as fresh.
+func RefreshInterval() time.Duration { return time.Duration(refreshInterval.Load()) }
+
+func minRediscover() time.Duration { return time.Duration(minRediscoverInterval.Load()) }
+
+// SetDiscoveryIntervals overrides the discovery timing and returns a function
+// that restores the previous values. Tests use it to shorten the intervals.
+func SetDiscoveryIntervals(refresh, minRediscoverAge time.Duration) (restore func()) {
+	previousRefresh := refreshInterval.Swap(int64(refresh))
+	previousRediscover := minRediscoverInterval.Swap(int64(minRediscoverAge))
+	return func() {
+		refreshInterval.Store(previousRefresh)
+		minRediscoverInterval.Store(previousRediscover)
+	}
+}
+
 const (
-	// discoveryTTL is how long discovered profiles count as fresh for model
-	// registration.
-	discoveryTTL = 6 * time.Hour
-	// rediscoverAfter limits how often a model listing or an unknown model name
-	// triggers another discovery.
-	rediscoverAfter = 5 * time.Minute
 	// maxDiscoveryPages bounds ListInferenceProfiles paging.
 	maxDiscoveryPages = 50
 	// emptyPayloadHash is the SHA-256 of an empty body, for signing GET requests.
@@ -87,26 +114,27 @@ func (e *discoveryEntry) store(models []DiscoveredModel, fetched time.Time) {
 }
 
 // CachedModelIDs returns the client-facing model names last discovered for a
-// Bedrock credential and whether that result is still fresh. ok is false for
-// credentials that do not target Bedrock.
-func CachedModelIDs(attrs map[string]string) (ids []string, fresh bool, ok bool) {
+// Bedrock credential and when they were discovered; fetched is zero when
+// nothing has been discovered yet. ok is false for credentials that do not
+// target Bedrock.
+func CachedModelIDs(attrs map[string]string) (ids []string, fetched time.Time, ok bool) {
 	settings, isBedrock := SettingsFromAttributes(attrs)
 	if !isBedrock {
-		return nil, false, false
+		return nil, time.Time{}, false
 	}
 	value, exists := discoveries.Load(discoveryKeyFor(settings))
 	if !exists {
-		return nil, false, true
+		return nil, time.Time{}, true
 	}
-	models, fetched, discovered := value.(*discoveryEntry).snapshot()
+	models, fetchedAt, discovered := value.(*discoveryEntry).snapshot()
 	if !discovered {
-		return nil, false, true
+		return nil, time.Time{}, true
 	}
 	ids = make([]string, 0, len(models))
 	for _, model := range models {
 		ids = append(ids, model.ID)
 	}
-	return ids, time.Since(fetched) < discoveryTTL, true
+	return ids, fetchedAt, true
 }
 
 // defaultGeo derives the inference profile geography from a region.
@@ -162,7 +190,7 @@ func (t *transport) resolveModel(ctx context.Context, creds aws.Credentials, reg
 		}
 		return "", false
 	}
-	models, errDiscover := t.discover(ctx, creds, region, discoveryTTL)
+	models, errDiscover := t.discover(ctx, creds, region, RefreshInterval())
 	if errDiscover != nil {
 		return "", false, errDiscover
 	}
@@ -170,7 +198,7 @@ func (t *transport) resolveModel(ctx context.Context, creds aws.Credentials, reg
 		return profileID, true, nil
 	}
 	// The model may be newer than the cached list.
-	if models, errDiscover = t.discover(ctx, creds, region, rediscoverAfter); errDiscover != nil {
+	if models, errDiscover = t.discover(ctx, creds, region, minRediscover()); errDiscover != nil {
 		return "", false, errDiscover
 	}
 	profileID, found := lookup(models)

@@ -74,9 +74,9 @@ func TestListModelsDiscoversEUClaudeProfiles(t *testing.T) {
 		t.Fatalf("Authorization = %s", auth)
 	}
 
-	cached, fresh, ok := CachedModelIDs(tr.settings.Attributes())
-	if !ok || !fresh || len(cached) != 3 {
-		t.Fatalf("cached = %v fresh=%v ok=%v", cached, fresh, ok)
+	cached, fetched, ok := CachedModelIDs(tr.settings.Attributes())
+	if !ok || fetched.IsZero() || len(cached) != 3 {
+		t.Fatalf("cached = %v fetched=%v ok=%v", cached, fetched, ok)
 	}
 	models, _, _ := discoveryEntryFor(tr.settings).snapshot()
 	for _, model := range models {
@@ -144,12 +144,12 @@ func TestUnknownModelIsNotFoundAndRediscoveryIsRateLimited(t *testing.T) {
 
 	_ = readAll(t, send())
 	if listCalls.Load() != afterFirst {
-		t.Fatal("an unknown model must not rediscover within rediscoverAfter")
+		t.Fatal("an unknown model must not rediscover within the minimum rediscover interval")
 	}
-	now = now.Add(rediscoverAfter + time.Second)
+	now = now.Add(minRediscover() + time.Second)
 	_ = readAll(t, send())
 	if listCalls.Load() == afterFirst {
-		t.Fatal("an unknown model should rediscover once the cache is older than rediscoverAfter")
+		t.Fatal("an unknown model should rediscover once the cache is older than the minimum rediscover interval")
 	}
 }
 

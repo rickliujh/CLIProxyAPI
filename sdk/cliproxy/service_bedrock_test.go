@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/bedrock"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -89,9 +91,12 @@ func TestBedrockEntryWithoutModelsRegistersDiscoveredProfiles(t *testing.T) {
 // a restart or config reload.
 func TestBedrockDiscoveryRetriesAfterFailure(t *testing.T) {
 	writeServiceBedrockProfile(t, "service-bedrock-retry")
-	initial, maxDelay := bedrockDiscoveryRetryInitial, bedrockDiscoveryRetryMax
-	bedrockDiscoveryRetryInitial, bedrockDiscoveryRetryMax = time.Millisecond, 2*time.Millisecond
-	t.Cleanup(func() { bedrockDiscoveryRetryInitial, bedrockDiscoveryRetryMax = initial, maxDelay })
+	initial := bedrockDiscoveryRetryInitial.Swap(int64(time.Millisecond))
+	maxDelay := bedrockDiscoveryRetryMax.Swap(int64(2 * time.Millisecond))
+	t.Cleanup(func() {
+		bedrockDiscoveryRetryInitial.Store(initial)
+		bedrockDiscoveryRetryMax.Store(maxDelay)
+	})
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -131,5 +136,60 @@ func TestBedrockDiscoveryRetriesAfterFailure(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "claude-haiku-5-5" || calls.Load() != 3 {
 		t.Fatalf("registered models = %v after %d discovery calls, want claude-haiku-5-5 after 3", ids, calls.Load())
+	}
+}
+
+// Models AWS adds while the proxy runs appear without a restart: the discovered
+// list is refreshed in the background and the credential is re-registered when
+// the list changes.
+func TestBedrockDiscoveryRefreshesInBackground(t *testing.T) {
+	writeServiceBedrockProfile(t, "service-bedrock-refresh")
+	t.Cleanup(bedrock.SetDiscoveryIntervals(20*time.Millisecond, 0))
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"inferenceProfileSummaries":[{"inferenceProfileId":"eu.anthropic.claude-haiku-5-5-v1:0","status":"ACTIVE"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"inferenceProfileSummaries":[{"inferenceProfileId":"eu.anthropic.claude-haiku-5-5-v1:0","status":"ACTIVE"},{"inferenceProfileId":"eu.anthropic.claude-sonnet-5-5-v1:0","status":"ACTIVE"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{Bedrock: &internalconfig.BedrockConfig{
+		Profile: "service-bedrock-refresh", Region: "eu-central-1", Endpoint: server.URL, ControlEndpoint: server.URL,
+	}}}}
+	auths, errSynth := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator()})
+	if errSynth != nil || len(auths) != 1 {
+		t.Fatalf("synthesize: %v (%d auths)", errSynth, len(auths))
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	svc := &Service{cfg: cfg, coreManager: manager}
+	auth, errRegister := manager.Register(t.Context(), auths[0])
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	t.Cleanup(func() {
+		// Stop the background loop before the next test reuses the registry.
+		manager.Remove(context.Background(), auth.ID)
+		GlobalModelRegistry().UnregisterClient(auth.ID)
+	})
+
+	svc.registerModelsForAuth(t.Context(), auth)
+
+	var ids []string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		ids = ids[:0]
+		for _, model := range GlobalModelRegistry().GetModelsForClient(auth.ID) {
+			ids = append(ids, model.ID)
+		}
+		sort.Strings(ids)
+		if len(ids) == 2 {
+			break
+		}
+	}
+	if strings.Join(ids, ",") != "claude-haiku-5-5,claude-sonnet-5-5" || calls.Load() < 2 {
+		t.Fatalf("registered models = %v after %d discovery calls, want the model added later to appear", ids, calls.Load())
 	}
 }
