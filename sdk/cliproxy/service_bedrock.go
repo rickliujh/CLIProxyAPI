@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/bedrock"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -40,6 +41,14 @@ func (s *Service) bedrockDiscoveredModels(cfg *config.Config, auth *coreauth.Aut
 	return buildConfigModels(entries, "anthropic", "claude", "claude")
 }
 
+// Retry delays after a failed discovery. A failure is often temporary (an SSO
+// session not logged in yet, a network blip), and without a retry the entry
+// would serve no models until the next restart or config reload.
+var (
+	bedrockDiscoveryRetryInitial = 30 * time.Second
+	bedrockDiscoveryRetryMax     = 10 * time.Minute
+)
+
 func (s *Service) queueBedrockDiscovery(cfg *config.Config, auth *coreauth.Auth) {
 	if s == nil || auth == nil || auth.ID == "" {
 		return
@@ -47,20 +56,64 @@ func (s *Service) queueBedrockDiscovery(cfg *config.Config, auth *coreauth.Auth)
 	if _, running := bedrockDiscoveries.LoadOrStore(auth.ID, struct{}{}); running {
 		return
 	}
-	snapshot := auth.Clone()
-	go func() {
-		defer bedrockDiscoveries.Delete(snapshot.ID)
-		if errDiscover := discoverBedrockModels(context.Background(), cfg, snapshot); errDiscover != nil {
-			log.Warnf("bedrock: model discovery for %s failed (list models under the entry's models instead, or grant bedrock:ListInferenceProfiles): %v", snapshot.ID, errDiscover)
+	go s.runBedrockDiscovery(cfg, auth.Clone())
+}
+
+// runBedrockDiscovery discovers the credential's models, retrying with backoff
+// until it succeeds, the credential is removed or disabled, or the service stops.
+// Each retry uses the current credential and config, so fixing the AWS profile
+// and reloading takes effect.
+func (s *Service) runBedrockDiscovery(cfg *config.Config, auth *coreauth.Auth) {
+	defer bedrockDiscoveries.Delete(auth.ID)
+	ctx := s.bedrockDiscoveryContext()
+	delay := bedrockDiscoveryRetryInitial
+	for {
+		errDiscover := discoverBedrockModels(ctx, cfg, auth)
+		if ctx.Err() != nil {
 			return
 		}
-		if s.coreManager == nil {
+		var current *coreauth.Auth
+		if s.coreManager != nil {
+			if found, exists := s.coreManager.GetByID(auth.ID); exists && found != nil && !found.Disabled {
+				current = found
+			}
+		}
+		if errDiscover == nil {
+			if current != nil {
+				s.refreshModelRegistrationForAuthWithCache(current, nil)
+			}
 			return
 		}
-		if current, exists := s.coreManager.GetByID(snapshot.ID); exists && current != nil && !current.Disabled {
-			s.refreshModelRegistrationForAuthWithCache(current, nil)
+		if current == nil {
+			log.Warnf("bedrock: model discovery for %s failed: %v", auth.ID, errDiscover)
+			return
 		}
-	}()
+		log.Warnf("bedrock: model discovery for %s failed, retrying in %s (check the AWS profile login and the bedrock:ListInferenceProfiles permission, or list models under the entry's models): %v", auth.ID, delay, errDiscover)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		delay = min(delay*2, bedrockDiscoveryRetryMax)
+		auth = current.Clone()
+		if latest := s.currentConfig(); latest != nil {
+			cfg = latest
+		}
+	}
+}
+
+// bedrockDiscoveryContext is the service's run context, so retries stop when
+// the service stops.
+func (s *Service) bedrockDiscoveryContext() context.Context {
+	s.cfgMu.RLock()
+	ctx := s.antigravityContext
+	s.cfgMu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // discoverBedrockModels lists models through the credential's own HTTP client,

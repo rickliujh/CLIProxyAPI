@@ -44,8 +44,11 @@ Discovery runs in the background when the entry is registered, and the models
 appear once it finishes. The result is cached for 6 hours; a request for a model
 name the cache does not know triggers another discovery, at most every 5 minutes,
 so newly released profiles are picked up. A model the account has no profile for
-gets a `404 not_found_error`. If discovery fails, a warning is logged and the
-entry serves no models until the next successful discovery.
+gets a `404 not_found_error`. If discovery fails, for example because the SSO
+session has expired, a warning is logged and discovery is retried after 30
+seconds, then at doubling intervals up to every 10 minutes, until it succeeds.
+The entry serves no models until then; run `aws sso login` and they appear at the
+next retry.
 
 To choose the models yourself, list them instead. Each `name` is a Bedrock model
 or inference profile ID and `alias` the name clients send:

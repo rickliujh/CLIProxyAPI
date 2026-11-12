@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,5 +81,55 @@ func TestBedrockEntryWithoutModelsRegistersDiscoveredProfiles(t *testing.T) {
 	sort.Strings(ids)
 	if want := "claude-opus-4-6,claude-sonnet-4-5-20250929"; strings.Join(ids, ",") != want {
 		t.Fatalf("registered models = %v, want %s", ids, want)
+	}
+}
+
+// A failed discovery is retried on its own, so an entry whose first discovery
+// fails (an SSO session not logged in yet, say) still gets its models without
+// a restart or config reload.
+func TestBedrockDiscoveryRetriesAfterFailure(t *testing.T) {
+	writeServiceBedrockProfile(t, "service-bedrock-retry")
+	initial, maxDelay := bedrockDiscoveryRetryInitial, bedrockDiscoveryRetryMax
+	bedrockDiscoveryRetryInitial, bedrockDiscoveryRetryMax = time.Millisecond, 2*time.Millisecond
+	t.Cleanup(func() { bedrockDiscoveryRetryInitial, bedrockDiscoveryRetryMax = initial, maxDelay })
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"The SSO session associated with this profile has expired"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"inferenceProfileSummaries":[{"inferenceProfileId":"eu.anthropic.claude-haiku-5-5-v1:0","status":"ACTIVE"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{Bedrock: &internalconfig.BedrockConfig{
+		Profile: "service-bedrock-retry", Region: "eu-central-1", Endpoint: server.URL, ControlEndpoint: server.URL,
+	}}}}
+	auths, errSynth := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator()})
+	if errSynth != nil || len(auths) != 1 {
+		t.Fatalf("synthesize: %v (%d auths)", errSynth, len(auths))
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	svc := &Service{cfg: cfg, coreManager: manager}
+	auth, errRegister := manager.Register(t.Context(), auths[0])
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+
+	svc.registerModelsForAuth(t.Context(), auth)
+
+	var ids []string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && len(ids) == 0; time.Sleep(10 * time.Millisecond) {
+		ids = ids[:0]
+		for _, model := range GlobalModelRegistry().GetModelsForClient(auth.ID) {
+			ids = append(ids, model.ID)
+		}
+	}
+	if strings.Join(ids, ",") != "claude-haiku-5-5" || calls.Load() != 3 {
+		t.Fatalf("registered models = %v after %d discovery calls, want claude-haiku-5-5 after 3", ids, calls.Load())
 	}
 }
