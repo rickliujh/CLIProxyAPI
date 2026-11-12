@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tls "github.com/refraction-networking/utls"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/bedrock"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
@@ -493,6 +494,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		handshakeTimeout = cfg.TLSHandshakeTimeout()
 	}
 	defer func() {
+		if clientOut != nil && auth != nil {
+			clientOut.Transport = bedrock.WrapTransport(auth.Attributes, clientOut.Transport)
+		}
 		clientOut = httptransport.Decorate(ctx, clientOut)
 		if clientOut != nil && handshakeTimeout > 0 {
 			clientOut.Transport = &tlsHandshakeTimeoutRoundTripper{base: clientOut.Transport, timeout: handshakeTimeout}
