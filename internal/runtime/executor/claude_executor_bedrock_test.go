@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/bedrock"

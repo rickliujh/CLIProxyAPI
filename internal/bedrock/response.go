@@ -2,7 +2,6 @@ package bedrock
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	log "github.com/sirupsen/logrus"

@@ -65,11 +65,12 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if errRead != nil {
 		return nil, errRead
 	}
-	model := strings.TrimSpace(ojson.GetBytes(body, "model").String())
+	doc := ojson.NewDoc(body)
+	model := strings.TrimSpace(doc.Get("model").String())
 	if model == "" {
 		return nil, fmt.Errorf("bedrock: request has no model")
 	}
-	stream := ojson.GetBytes(body, "stream").Bool()
+	stream := doc.Get("stream").Bool()
 
 	creds, region, errCreds := t.creds(req.Context())
 	if errCreds != nil {
@@ -87,23 +88,27 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		model = profileID
 	}
 
-	payload, errPayload := t.invokeBody(body, req.Header)
-	if errPayload != nil {
-		return nil, errPayload
+	if errPrepare := t.prepareInvokeDoc(doc, req.Header); errPrepare != nil {
+		return nil, errPrepare
 	}
-	var action string
+	var (
+		action  string
+		payload []byte
+	)
 	switch {
 	case op == opCountTokens:
 		model = foundationModelID(model)
 		action = "count-tokens"
-		payload, errPayload = countTokensBody(payload)
-		if errPayload != nil {
+		var errPayload error
+		if payload, errPayload = countTokensPayload(doc); errPayload != nil {
 			return nil, errPayload
 		}
 	case stream:
 		action = "invoke-with-response-stream"
+		payload = doc.Bytes()
 	default:
 		action = "invoke"
+		payload = doc.Bytes()
 	}
 
 	outReq, errBuild := t.newUpstreamRequest(req.Context(), region, model, action, payload, req.Header)
@@ -181,36 +186,32 @@ func closeRequestBody(req *http.Request) {
 	}
 }
 
-// invokeBody turns an Anthropic Messages body into a Bedrock InvokeModel body:
-// the model moves into the URL, streaming is chosen by the endpoint, and the
-// anthropic-beta header becomes the anthropic_beta field.
-func (t *transport) invokeBody(body []byte, header http.Header) ([]byte, error) {
-	out, errDelete := ojson.DeleteBytes(body, "model")
-	if errDelete != nil {
-		return nil, fmt.Errorf("bedrock: rewrite request body: %w", errDelete)
-	}
-	if out, errDelete = ojson.DeleteBytes(out, "stream"); errDelete != nil {
-		return nil, fmt.Errorf("bedrock: rewrite request body: %w", errDelete)
-	}
-	var errSet error
-	if out, errSet = ojson.SetBytes(out, "anthropic_version", anthropicVersion); errSet != nil {
-		return nil, fmt.Errorf("bedrock: rewrite request body: %w", errSet)
-	}
+// prepareInvokeDoc turns an Anthropic Messages body into a Bedrock InvokeModel
+// body in place: the model moves into the URL, streaming is chosen by the
+// endpoint, and the anthropic-beta header becomes the anthropic_beta field.
+// These are transport framing changes; the business payload is untouched.
+func (t *transport) prepareInvokeDoc(doc *ojson.Doc, header http.Header) error {
 	requested := splitList(strings.Join(header.Values("Anthropic-Beta"), ","))
-	for _, existing := range ojson.GetBytes(out, "anthropic_beta").Array() {
+	for _, existing := range doc.Get("anthropic_beta").Array() {
 		requested = append(requested, existing.String())
 	}
 	betas := t.allowedBetas(requested)
+	edits := []func() error{
+		func() error { return doc.Delete("model") },
+		func() error { return doc.Delete("stream") },
+		func() error { return doc.Set("anthropic_version", anthropicVersion) },
+	}
 	if len(betas) == 0 {
-		if out, errDelete = ojson.DeleteBytes(out, "anthropic_beta"); errDelete != nil {
-			return nil, fmt.Errorf("bedrock: rewrite request body: %w", errDelete)
+		edits = append(edits, func() error { return doc.Delete("anthropic_beta") })
+	} else {
+		edits = append(edits, func() error { return doc.Set("anthropic_beta", betas) })
+	}
+	for _, edit := range edits {
+		if errEdit := edit(); errEdit != nil {
+			return fmt.Errorf("bedrock: rewrite request body: %w", errEdit)
 		}
-		return out, nil
 	}
-	if out, errSet = ojson.SetBytes(out, "anthropic_beta", betas); errSet != nil {
-		return nil, fmt.Errorf("bedrock: rewrite request body: %w", errSet)
-	}
-	return out, nil
+	return nil
 }
 
 func (t *transport) allowedBetas(requested []string) []string {
@@ -245,19 +246,19 @@ func (t *transport) allowedBetas(requested []string) []string {
 	return out
 }
 
-// countTokensBody wraps an InvokeModel body in the CountTokens request shape.
-func countTokensBody(invokeBody []byte) ([]byte, error) {
-	if !ojson.GetBytes(invokeBody, "max_tokens").Exists() {
-		var errSet error
-		if invokeBody, errSet = ojson.SetBytes(invokeBody, "max_tokens", countTokensMaxTokens); errSet != nil {
+// countTokensPayload wraps an InvokeModel body in the CountTokens request
+// shape, which carries that body as a JSON string.
+func countTokensPayload(invokeDoc *ojson.Doc) ([]byte, error) {
+	if !invokeDoc.Get("max_tokens").Exists() {
+		if errSet := invokeDoc.Set("max_tokens", countTokensMaxTokens); errSet != nil {
 			return nil, fmt.Errorf("bedrock: rewrite count_tokens body: %w", errSet)
 		}
 	}
-	out, errSet := ojson.SetBytes([]byte(`{}`), "input.invokeModel.body", string(invokeBody))
-	if errSet != nil {
+	out := ojson.NewDocString(`{}`)
+	if errSet := out.Set("input.invokeModel.body", invokeDoc.String()); errSet != nil {
 		return nil, fmt.Errorf("bedrock: rewrite count_tokens body: %w", errSet)
 	}
-	return out, nil
+	return out.Bytes(), nil
 }
 
 // foundationModelID strips a cross-region inference profile prefix, since

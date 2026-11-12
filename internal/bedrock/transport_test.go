@@ -3,7 +3,6 @@ package bedrock
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
@@ -143,20 +143,21 @@ func TestConfiguredBetasReplaceDefaults(t *testing.T) {
 	tr := newTestTransport("https://example.invalid", Settings{BetasSet: true, Betas: []string{"claude-code-20250219"}})
 	header := http.Header{}
 	header.Set("Anthropic-Beta", "claude-code-20250219,interleaved-thinking-2025-05-14")
-	out, errBody := tr.invokeBody([]byte(`{"model":"m","messages":[]}`), header)
-	if errBody != nil {
-		t.Fatal(errBody)
+	doc := ojson.NewDocString(`{"model":"m","messages":[]}`)
+	if errPrepare := tr.prepareInvokeDoc(doc, header); errPrepare != nil {
+		t.Fatal(errPrepare)
 	}
-	if raw := ojson.GetBytes(out, "anthropic_beta").Raw; raw != `["claude-code-20250219"]` {
+	if raw := doc.Get("anthropic_beta").Raw; raw != `["claude-code-20250219"]` {
 		t.Fatalf("anthropic_beta = %s", raw)
 	}
 
 	tr = newTestTransport("https://example.invalid", Settings{BetasSet: true})
-	if out, errBody = tr.invokeBody([]byte(`{"model":"m","anthropic_beta":["x"]}`), header); errBody != nil {
-		t.Fatal(errBody)
+	doc = ojson.NewDocString(`{"model":"m","anthropic_beta":["x"]}`)
+	if errPrepare := tr.prepareInvokeDoc(doc, header); errPrepare != nil {
+		t.Fatal(errPrepare)
 	}
-	if ojson.GetBytes(out, "anthropic_beta").Exists() {
-		t.Fatalf("an empty beta list must forward none: %s", out)
+	if doc.Get("anthropic_beta").Exists() {
+		t.Fatalf("an empty beta list must forward none: %s", doc.Bytes())
 	}
 }
 

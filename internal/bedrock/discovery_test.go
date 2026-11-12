@@ -51,7 +51,7 @@ func newDiscoveryTransport(endpoint, profile string, now *time.Time) *transport 
 func TestListModelsDiscoversEUClaudeProfiles(t *testing.T) {
 	var listCalls atomic.Int32
 	endpoint, requests := fakeInferenceProfiles(t, &listCalls)
-	now := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	now := time.Now()
 	tr := newDiscoveryTransport(endpoint, "discovery-list", &now)
 
 	req, _ := http.NewRequest(http.MethodGet, "https://bedrock-runtime.amazonaws.com/v1/models", nil)
@@ -89,7 +89,7 @@ func TestListModelsDiscoversEUClaudeProfiles(t *testing.T) {
 func TestMessagesMapAnthropicNamesToDiscoveredProfiles(t *testing.T) {
 	var listCalls atomic.Int32
 	endpoint, requests := fakeInferenceProfiles(t, &listCalls)
-	now := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	now := time.Now()
 	tr := newDiscoveryTransport(endpoint, "discovery-map", &now)
 
 	resp, errDo := tr.RoundTrip(anthropicRequest(t, "/v1/messages", `{"model":"claude-opus-4-6","max_tokens":8}`))
@@ -122,7 +122,7 @@ func TestMessagesMapAnthropicNamesToDiscoveredProfiles(t *testing.T) {
 func TestUnknownModelIsNotFoundAndRediscoveryIsRateLimited(t *testing.T) {
 	var listCalls atomic.Int32
 	endpoint, _ := fakeInferenceProfiles(t, &listCalls)
-	now := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	now := time.Now()
 	tr := newDiscoveryTransport(endpoint, "discovery-unknown", &now)
 
 	send := func() *http.Response {
